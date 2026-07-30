@@ -1,0 +1,14 @@
+# deploy / narzędzia
+.vercel
+.env*
+*.log
+
+# katalogi robocze agentów i notatek
+.agents
+.codex
+context
+
+# śmieci systemowe
+Thumbs.db
+desktop.ini
+.DS_Store

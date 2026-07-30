@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GraDron — symulator FPV</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0a0d12; }
+  body { font-family: "Consolas", "SF Mono", ui-monospace, monospace; color: #d8f5e0; }
+  #view { display: block; width: 100vw; height: 100vh; }
+
+  /* ---------- OSD ---------- */
+  #osd {
+    position: fixed; inset: 0; pointer-events: none;
+    text-shadow: 0 0 4px rgba(0,0,0,.9), 0 1px 2px rgba(0,0,0,.9);
+    color: #eafff0; font-size: 15px; letter-spacing: .5px;
+  }
+  #osd.hidden { display: none; }
+  .box { position: absolute; }
+  #osd-tl { top: 14px; left: 18px; }
+  #osd-tr { top: 14px; right: 18px; text-align: right; }
+  #osd-bl { bottom: 16px; left: 18px; }
+  #osd-br { bottom: 16px; right: 18px; text-align: right; }
+  #osd-bc { bottom: 16px; left: 50%; transform: translateX(-50%); text-align: center; }
+  .lbl { opacity: .6; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; }
+  .big { font-size: 30px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  .mid { font-size: 19px; font-variant-numeric: tabular-nums; }
+  .accent { color: #7ef7c0; }
+  .warn { color: #ffcf5c; }
+  .bad { color: #ff6f6f; }
+
+  /* throttle bar */
+  #thr-wrap { position: absolute; left: 20px; top: 50%; transform: translateY(-50%);
+    width: 12px; height: 190px; border: 1px solid rgba(234,255,240,.35); border-radius: 3px;
+    background: rgba(0,0,0,.25); }
+  #thr-fill { position: absolute; bottom: 0; left: 0; width: 100%; height: 0%;
+    background: linear-gradient(#7ef7c0, #2fd08a); border-radius: 2px; }
+  #thr-wrap::after { content: ""; position: absolute; left: -5px; right: -5px; bottom: 22%;
+    border-top: 1px dashed rgba(234,255,240,.35); }
+
+  /* sticks */
+  .stick { position: absolute; bottom: 74px; width: 62px; height: 62px;
+    border: 1px solid rgba(234,255,240,.25); border-radius: 4px; background: rgba(0,0,0,.2); }
+  #stick-l { left: 18px; } #stick-r { right: 18px; }
+  .stick i { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%;
+    background: #7ef7c0; box-shadow: 0 0 6px #2fd08a; left: 50%; top: 50%; }
+
+  /* crosshair + horizon */
+  #center { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+  #horizon { position: absolute; left: -160px; top: 0; width: 320px; height: 0;
+    border-top: 1px solid rgba(126,247,192,.55); }
+  #horizon::before, #horizon::after { content: ""; position: absolute; top: -1px; width: 26px;
+    border-top: 3px solid rgba(126,247,192,.9); }
+  #horizon::before { left: -46px; } #horizon::after { right: -46px; }
+  #dot { position: absolute; left: -3px; top: -3px; width: 6px; height: 6px; border-radius: 50%;
+    background: rgba(126,247,192,.95); }
+
+  /* messages */
+  #msg { position: absolute; left: 50%; top: 27%; transform: translate(-50%,-50%);
+    text-align: center; font-size: 42px; font-weight: 800; letter-spacing: 3px; opacity: 0;
+    transition: opacity .18s; text-transform: uppercase; }
+  #msg.show { opacity: 1; }
+  #msg small { display: block; font-size: 15px; font-weight: 500; letter-spacing: 2px; opacity: .85; margin-top: 6px; }
+
+  /* fpv feel */
+  #vignette { position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,.55) 100%); }
+  #scan { position: fixed; inset: 0; pointer-events: none; opacity: .16; mix-blend-mode: overlay;
+    background: repeating-linear-gradient(to bottom, rgba(255,255,255,.35) 0 1px, rgba(0,0,0,0) 1px 3px); }
+  #vignette.off, #scan.off, #signal-noise.off, #signal-tear.off, #signal-blackout.off { display: none; }
+  #static { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: #cfd8d4;
+    mix-blend-mode: overlay; }
+  #signal-noise, #signal-tear, #signal-blackout { position: fixed; inset: 0; pointer-events: none; opacity: 0; }
+  #signal-noise {
+    z-index: 5; mix-blend-mode: screen;
+    background:
+      repeating-radial-gradient(circle at 17% 31%, rgba(255,255,255,.42) 0 1px, transparent 1px 4px),
+      repeating-linear-gradient(97deg, transparent 0 7px, rgba(180,220,210,.25) 8px 9px, transparent 10px 14px);
+    background-size: 9px 7px, 17px 11px;
+  }
+  #signal-tear {
+    z-index: 6; height: 11%; top: 44%; bottom: auto;
+    background: repeating-linear-gradient(to bottom, rgba(235,255,247,.32) 0 1px,
+      rgba(8,15,17,.75) 2px 4px, transparent 5px 8px);
+    mix-blend-mode: hard-light;
+  }
+  #signal-blackout { z-index: 7; background: #020405; }
+
+  /* ---------- panele ---------- */
+  .panel {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(6,10,14,.82); backdrop-filter: blur(6px); z-index: 10;
+  }
+  .panel.hidden { display: none; }
+  .card { width: min(760px, 92vw); max-height: 88vh; overflow: auto; padding: 30px 34px;
+    border: 1px solid rgba(126,247,192,.28); border-radius: 12px;
+    background: linear-gradient(160deg, rgba(16,26,24,.96), rgba(9,14,18,.96));
+    box-shadow: 0 24px 70px rgba(0,0,0,.6); }
+  .card h1 { margin: 0 0 4px; font-size: 30px; letter-spacing: 4px; color: #7ef7c0; }
+  .card h2 { margin: 22px 0 8px; font-size: 13px; letter-spacing: 3px; text-transform: uppercase; opacity: .65; }
+  .card p { margin: 6px 0; line-height: 1.55; opacity: .9; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 4px 26px; }
+  .row { display: flex; justify-content: space-between; gap: 14px; padding: 4px 0;
+    border-bottom: 1px dashed rgba(234,255,240,.12); font-size: 13px; }
+  .row b { color: #7ef7c0; font-weight: 600; white-space: nowrap; }
+  .cta { margin-top: 26px; text-align: center; font-size: 15px; color: #7ef7c0; letter-spacing: 2px; }
+  .blink { animation: b 1.1s ease-in-out infinite; }
+  @keyframes b { 50% { opacity: .35; } }
+
+  /* ---------- ekran wejścia ---------- */
+  #start {
+    justify-content: flex-start; padding: clamp(18px, 5vw, 76px);
+    background:
+      linear-gradient(90deg, rgba(5,10,13,.97) 0%, rgba(5,10,13,.88) 36%, rgba(5,10,13,.22) 68%, rgba(5,10,13,.38) 100%),
+      linear-gradient(0deg, rgba(5,10,13,.88), transparent 44%),
+      url("assets/ui/fpv-hero.png") center/cover no-repeat;
+  }
+  #start .start-card {
+    width: min(760px, 94vw); max-height: 94vh; padding: 0; overflow: visible;
+    border: 0; background: none; box-shadow: none;
+  }
+  #start .start-card > h1 { display: none; }
+  #start .start-card > h2, #start .start-card > .grid,
+  #start .start-card > p, #start .start-card > .cta { display: none; }
+  .eyebrow { color: #7ef7c0; font-size: 11px; letter-spacing: 3px; text-transform: uppercase; }
+  .hero-title { margin: 10px 0 6px; font: 900 clamp(50px, 8vw, 94px)/.9 system-ui, sans-serif;
+    letter-spacing: -5px; color: #f1fff6; text-shadow: 0 8px 42px rgba(0,0,0,.65); }
+  .hero-title span { color: #7ef7c0; }
+  .hero-sub { max-width: 580px; margin: 18px 0 24px; color: rgba(235,249,241,.78);
+    font: 400 15px/1.6 system-ui, sans-serif; }
+  .map-picker { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; margin: 14px 0 22px; }
+  .map-card { position: relative; min-height: 112px; padding: 15px; text-align: left; cursor: pointer;
+    border: 1px solid rgba(224,244,233,.16); border-radius: 10px; color: #eafff0;
+    background: linear-gradient(145deg, rgba(13,23,25,.84), rgba(8,13,16,.7));
+    font-family: inherit; transition: transform .16s, border-color .16s, background .16s; overflow: hidden; }
+  .map-card::after { content:""; position:absolute; inset:auto -14px -35px auto; width:92px; height:92px;
+    border-radius:50%; background:var(--map-glow,#7ef7c0); filter:blur(34px); opacity:.13; }
+  .map-card:hover { transform: translateY(-2px); border-color: rgba(126,247,192,.55); }
+  .map-card.active { border-color: #7ef7c0; background: linear-gradient(145deg, rgba(30,63,55,.88), rgba(8,16,17,.82));
+    box-shadow: inset 0 0 0 1px rgba(126,247,192,.12), 0 9px 30px rgba(0,0,0,.28); }
+  .map-card small { display:block; color:#7ef7c0; letter-spacing:1.6px; text-transform:uppercase; font-size:9px; }
+  .map-card strong { display:block; margin:7px 0 5px; font:700 14px/1.1 system-ui,sans-serif; }
+  .map-card span { display:block; opacity:.58; font-size:10px; line-height:1.35; }
+  .launch-row { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  #start-play { border:0; border-radius:8px; padding:15px 28px; cursor:pointer; color:#07100c;
+    background:#7ef7c0; font:800 13px/1 system-ui,sans-serif; letter-spacing:1.7px; text-transform:uppercase;
+    box-shadow:0 9px 32px rgba(47,208,138,.24); }
+  #start-play:hover { background:#a5ffd5; transform:translateY(-1px); }
+  .key-hint { opacity:.6; font-size:11px; line-height:1.6; }
+  .hero-badges { display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+  .hero-badges span { padding:5px 8px; border:1px solid rgba(234,255,240,.14); border-radius:99px;
+    color:rgba(234,255,240,.72); font-size:9px; letter-spacing:1px; text-transform:uppercase; }
+  #menu .card { width:min(900px,94vw); }
+  #menu-map-cards { margin-top:16px; }
+  /* pozycje menu */
+  #menu-items { margin-top: 18px; }
+  .mi { display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    padding: 7px 12px; border: 1px solid transparent; border-radius: 6px; cursor: pointer;
+    font-size: 14px; }
+  .mi b { color: #eafff0; opacity: .75; font-weight: 600; }
+  .mi:hover { background: rgba(126,247,192,.06); }
+  .mi.sel { background: rgba(126,247,192,.13); border-color: rgba(126,247,192,.55); }
+  .mi.sel b { color: #7ef7c0; opacity: 1; }
+  .padrow { margin-top: 16px; padding: 8px 12px; border-radius: 6px; font-size: 12px;
+    letter-spacing: 1px; background: rgba(0,0,0,.3); border: 1px dashed rgba(234,255,240,.18); }
+
+  kbd { display: inline-block; padding: 1px 6px; border: 1px solid rgba(234,255,240,.3);
+    border-bottom-width: 2px; border-radius: 4px; font-size: 12px; background: rgba(0,0,0,.3); }
+  @media (max-width: 680px) {
+    #start { align-items:flex-end; padding:18px; background-position:62% center; }
+    .hero-title { font-size:52px; letter-spacing:-3px; }
+    .hero-sub { font-size:13px; margin:12px 0 16px; }
+    .map-picker { grid-template-columns:1fr; gap:6px; }
+    .map-card { min-height:66px; padding:10px 12px; }
+    .map-card span { display:none; }
+    .map-card strong { margin:4px 0 0; }
+    #menu .map-picker { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="osd">
+  <div class="box" id="osd-tl">
+    <div class="lbl">czas przelotu</div>
+    <div class="big" id="f-time">0.00</div>
+    <div class="mid" id="f-best" style="opacity:.7">best —</div>
+  </div>
+
+  <div class="box" id="osd-tr">
+    <div class="lbl" id="f-gate-lbl">bramka</div>
+    <div class="big" id="f-gate">1/0</div>
+    <div class="mid" id="f-mode">ACRO</div>
+    <div class="mid" id="f-dist" style="opacity:.7">— m</div>
+  </div>
+
+  <div class="box" id="osd-bl">
+    <div class="lbl">bateria</div>
+    <div class="mid" id="f-batt">4.20V</div>
+    <div class="mid" id="f-wind" style="font-size:12px;letter-spacing:1.2px;opacity:.8">WIATR 0.0 m/s</div>
+    <div class="mid" id="f-signal" style="font-size:12px;letter-spacing:1.2px;opacity:.8">LQ 100% · RSSI -45</div>
+    <div class="mid" id="f-pad" style="font-size:12px;letter-spacing:1.5px;opacity:.75">KLAWIATURA</div>
+  </div>
+
+  <div class="box" id="osd-bc">
+    <div class="lbl">prędkość</div>
+    <div class="big" id="f-spd">0<span style="font-size:14px"> km/h</span></div>
+  </div>
+
+  <div class="box" id="osd-br">
+    <div class="lbl">wysokość</div>
+    <div class="big" id="f-alt">0<span style="font-size:14px"> m</span></div>
+    <div class="mid" id="f-crash" style="opacity:.7">crash 0</div>
+  </div>
+
+  <div id="thr-wrap"><div id="thr-fill"></div></div>
+  <div class="stick" id="stick-l"><i></i></div>
+  <div class="stick" id="stick-r"><i></i></div>
+
+  <div id="center"><div id="horizon"></div><div id="dot"></div></div>
+  <div id="msg"></div>
+</div>
+
+<div id="vignette"></div>
+<div id="scan"></div>
+<div id="static"></div>
+<div id="signal-noise"></div>
+<div id="signal-tear"></div>
+<div id="signal-blackout"></div>
+
+<div class="panel" id="start">
+  <div class="card start-card">
+    <h1>GRADRON</h1>
+    <section class="start-hero">
+      <div class="eyebrow">Symulator lotu FPV / Acro</div>
+      <div class="hero-title">GRA<span>DRON</span></div>
+      <div class="hero-badges"><span>realna fizyka</span><span>wiatr do 16 m/s</span><span>analogowy VTX</span></div>
+      <p class="hero-sub">Poczuj masę, bezwładność i prawdziwe sterowanie dronem. Wybierz środowisko,
+        załóż gogle i leć — obraz zacznie zanikać, gdy oddalisz się lub schowasz za przeszkodą.</p>
+      <div class="map-picker" id="start-map-cards"></div>
+      <div class="launch-row">
+        <button id="start-play" type="button">Uruchom lot</button>
+        <div class="key-hint"><kbd>SPACJA</kbd> start<br><kbd>ESC</kbd> menu podczas lotu</div>
+      </div>
+    </section>
+    <p style="opacity:.7">Realistyczny lot FPV — tryb acro i wyścig na opuszczonym terenie przemysłowym.</p>
+
+    <h2>Klawiatura</h2>
+    <div class="grid">
+      <div class="row"><span>Gaz góra / dół</span><b>W / S</b></div>
+      <div class="row"><span>Yaw (obrót) lewo / prawo</span><b>A / D</b></div>
+      <div class="row"><span>Pitch (nos) przód / tył</span><b>↑ / ↓</b></div>
+      <div class="row"><span>Roll (przechył)</span><b>← / →</b></div>
+      <div class="row"><span>Tryb ACRO / ANGLE</span><b>M</b></div>
+      <div class="row"><span>Kamera FPV / z 3. osoby</span><b>C</b></div>
+      <div class="row"><span>Reset drona (respawn)</span><b>R</b></div>
+      <div class="row"><span>Restart wyścigu</span><b>T</b></div>
+      <div class="row"><span>Kąt kamery FPV −/+</span><b>[ / ]</b></div>
+      <div class="row"><span>Dźwięk silników</span><b>N</b></div>
+      <div class="row"><span>Efekty analogowe VTX</span><b>V</b></div>
+      <div class="row"><span>Zmiana mapy</span><b>K</b></div>
+      <div class="row"><span>Następny cel nawigacji</span><b>G</b></div>
+      <div class="row"><span>MENU / pauza</span><b>ESC</b></div>
+    </div>
+
+    <h2>Mapy</h2>
+    <p><b>Tor wyścigowy</b> — 12 bramek na czas. <b>Port Mewi</b> i <b>Dolina Wilcza</b> — duże mapy
+      misyjne do lotu swobodnego: suwnice, kontenery, most, farma offshore, zapora, wyciąg, las.
+      Mapę zmienia się klawiszem <kbd>K</kbd> lub w menu; wybór jest pamiętany.
+      Na mapach misyjnych <kbd>G</kbd> przełącza cel nawigacji (słup światła + dystans w OSD),
+      a <kbd>R</kbd> stawia drona nad wybranym celem. Uwaga: <b>kontakt z wodą kończy lot</b>.</p>
+
+    <h2>Pad Xbox 360 / Xbox One / dowolny</h2>
+    <div class="grid">
+      <div class="row"><span>Gaz + yaw</span><b>lewy drążek</b></div>
+      <div class="row"><span>Pitch + roll</span><b>prawy drążek</b></div>
+      <div class="row"><span>Respawn</span><b>A</b></div>
+      <div class="row"><span>Kamera FPV / z 3. osoby</span><b>B</b></div>
+      <div class="row"><span>Tryb ACRO / ANGLE</span><b>X</b></div>
+      <div class="row"><span>Restart wyścigu</span><b>Y</b></div>
+      <div class="row"><span>Kąt kamery / dystans −+</span><b>LB / RB</b></div>
+      <div class="row"><span>OSD on/off</span><b>Back</b></div>
+      <div class="row"><span>MENU / wyjście z ustawień</span><b>Start</b></div>
+      <div class="row"><span>Gaz na spustkach</span><b>RT / LT (opcja w menu)</b></div>
+    </div>
+    <p>Lewy drążek jest sprężynowany, więc domyślnie <b>środek = zawis</b> (tryb gazu HOVER):
+      w górę przyspieszasz w osi drona, w dół schodzisz. W menu (<kbd>ESC</kbd>) przełączysz to na
+      LINIOWY (środek = 50% gazu) albo SPUSTKI (gaz na RT).</p>
+
+    <h2>Jak się lata w acro</h2>
+    <p>Dron nie stabilizuje się sam — utrzymanie poziomu to Twoja robota. Gaz to ciąg
+      <em>w kierunku, w którym patrzy dron</em>: przechyl nos w przód i dodaj gazu, żeby przyspieszyć.
+      Zawis to ok. 22% gazu. Żeby zwolnić — obróć się o 180° albo zrób podbicie nosem do góry.</p>
+    <p>Przelatuj przez bramki <b>po kolei</b> — podświetlona na zielono jest następna.</p>
+
+    <div class="cta blink">KLIKNIJ LUB WCIŚNIJ SPACJĘ, ŻEBY WYSTARTOWAĆ</div>
+  </div>
+</div>
+
+<div class="panel hidden" id="menu">
+  <div class="card">
+    <h1>MENU</h1>
+    <div class="map-picker" id="menu-map-cards"></div>
+    <div id="menu-items"></div>
+    <div class="padrow" id="pad-status">pad: —</div>
+
+    <h2>sterowanie</h2>
+    <div class="grid">
+      <div class="row"><span>Gaz</span><b>W / S</b></div>
+      <div class="row"><span>Gaz (pad)</span><b>lewy drążek ↑↓</b></div>
+      <div class="row"><span>Yaw</span><b>A / D</b></div>
+      <div class="row"><span>Yaw (pad)</span><b>lewy drążek ←→</b></div>
+      <div class="row"><span>Pitch</span><b>↑ / ↓</b></div>
+      <div class="row"><span>Pitch (pad)</span><b>prawy drążek ↑↓</b></div>
+      <div class="row"><span>Roll</span><b>← / →</b></div>
+      <div class="row"><span>Roll (pad)</span><b>prawy drążek ←→</b></div>
+      <div class="row"><span>Respawn</span><b>R</b> / <b>A</b></div>
+      <div class="row"><span>Kamera FPV / 3. osoba</span><b>C</b> / <b>B</b></div>
+      <div class="row"><span>Tryb lotu</span><b>M</b> / <b>X</b></div>
+      <div class="row"><span>Restart wyścigu</span><b>T</b> / <b>Y</b></div>
+      <div class="row"><span>Kąt kamery (FPV) / dystans (3. os.)</span><b>[ / ]</b> / <b>LB / RB</b></div>
+      <div class="row"><span>OSD</span><b>O</b> / <b>Back</b></div>
+      <div class="row"><span>Zmiana mapy</span><b>K</b></div>
+      <div class="row"><span>Cel nawigacji (mapy misyjne)</span><b>G</b></div>
+      <div class="row"><span>Menu / powrót do lotu</span><b>ESC</b> / <b>Start</b></div>
+      <div class="row"><span>Dźwięk / VTX</span><b>N</b> / <b>V</b></div>
+    </div>
+
+    <div class="cta">↑↓ + <kbd>ENTER</kbd> · myszką też · pad: <kbd>D-pad</kbd> + <kbd>A</kbd><br>
+      <span class="blink">START NA PADZIE / ESC — WYJŚCIE Z USTAWIEŃ I POWRÓT DO LOTU</span></div>
+  </div>
+</div>
+
+<script>
+// widoczny komunikat, gdyby coś padło (np. brak WebGL)
+window.addEventListener('error', function (e) {
+  document.title = 'ERR: ' + e.message;
+  var d = document.createElement('pre');
+  d.style.cssText = 'position:fixed;z-index:99;left:12px;bottom:12px;max-width:70vw;padding:10px 14px;' +
+    'background:rgba(60,0,0,.85);border:1px solid #ff6f6f;color:#ffd9d9;font-size:12px;white-space:pre-wrap';
+  d.textContent = 'BŁĄD: ' + e.message + '\n' + (e.filename || '') + ':' + e.lineno;
+  document.body.appendChild(d);
+});
+</script>
+<script src="vendor/three.min.js"></script>
+<script src="map-port.js"></script>
+<script src="map-alpine.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

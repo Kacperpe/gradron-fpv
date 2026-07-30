@@ -1,0 +1,7 @@
+.git
+.vercel
+.env*
+.agents
+.codex
+context
+*.log
