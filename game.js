@@ -866,8 +866,10 @@ const tilt = {
   range: Number(localStorage.getItem('gradron.tiltrange')) || 28,   // stopnie do wychylenia max
   roll: 0, pitch: 0,                                               // -1..1 po kalibracji
   refRoll: null, refPitch: null, rawRoll: 0, rawPitch: 0, lastEvent: 0,
+  source: '—', lastOrient: 0,
   // pola tylko do diagnostyki na żywym telefonie (menu → Diagnostyka czujnika)
-  events: 0, perm: 'nie pytano', note: '', alpha: 0, beta: 0, gamma: 0, angle: 0, nulls: 0
+  events: 0, perm: 'nie pytano', note: '', alpha: 0, beta: 0, gamma: 0, angle: 0, nulls: 0,
+  motionEvents: 0, motionNulls: 0, motionPerm: 'nie pytano', acc: [0, 0, 0]
 };
 const TILT_RANGES = [18, 28, 40];
 
@@ -892,17 +894,17 @@ function tiltAxes(e) {
     pitch: Math.asin(clamp(-_tUp.y, -1, 1)) / DEG     // dodatnie = górna krawędź w dół
   };
 }
-function onTiltEvent(e) {
-  tilt.events++;
-  tilt.alpha = e.alpha; tilt.beta = e.beta; tilt.gamma = e.gamma;
-  tilt.angle = (screen.orientation && typeof screen.orientation.angle === 'number')
-    ? screen.orientation.angle : (window.orientation || 0);
-  if (e.beta === null && e.gamma === null) { tilt.nulls++; return; }
-  const ax = tiltAxes(e);
+/* wspólne wejście dla obu czujników: kąty już w układzie ekranu */
+function applyTilt(rollDeg, pitchDeg, source) {
+  const now = performance.now();
+  // odczyt z orientacji jest gładszy, więc akcelerometr wchodzi tylko gdy tamtego brak
+  if (source === 'akcelerometr' && tilt.source === 'orientacja' && now - tilt.lastOrient < 1500) return;
+  tilt.source = source;
+  if (source === 'orientacja') tilt.lastOrient = now;
   if (!tilt.ready) { tilt.ready = true; tilt.note = ''; paintTiltBtn(); }
-  tilt.lastEvent = performance.now();
-  tilt.rawRoll = ax.roll; tilt.rawPitch = ax.pitch;
-  if (tilt.refRoll === null) { tilt.refRoll = ax.roll; tilt.refPitch = ax.pitch; }
+  tilt.lastEvent = now;
+  tilt.rawRoll = rollDeg; tilt.rawPitch = pitchDeg;
+  if (tilt.refRoll === null) { tilt.refRoll = rollDeg; tilt.refPitch = pitchDeg; }
   const dead = 1.6;
   const norm = (v, ref) => {
     let d = v - ref;
@@ -910,8 +912,50 @@ function onTiltEvent(e) {
     d -= Math.sign(d) * dead;
     return clamp(d / tilt.range, -1, 1);
   };
-  tilt.roll = norm(ax.roll, tilt.refRoll);        // prawa krawędź w dół = przechył w prawo
-  tilt.pitch = -norm(ax.pitch, tilt.refPitch);    // górna krawędź w dół = nos w dół
+  tilt.roll = norm(rollDeg, tilt.refRoll);        // prawa krawędź w dół = przechył w prawo
+  tilt.pitch = -norm(pitchDeg, tilt.refPitch);    // górna krawędź w dół = nos w dół
+}
+function screenAngle() {
+  return (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle : (window.orientation || 0);
+}
+function onTiltEvent(e) {
+  tilt.events++;
+  tilt.alpha = e.alpha; tilt.beta = e.beta; tilt.gamma = e.gamma;
+  tilt.angle = screenAngle();
+  if ((e.beta === null || e.beta === undefined) && (e.gamma === null || e.gamma === undefined)) {
+    tilt.nulls++; return;
+  }
+  const ax = tiltAxes(e);
+  applyTilt(ax.roll, ax.pitch, 'orientacja');
+}
+
+/* Akcelerometr: wektor przyspieszenia z grawitacją to po prostu pion świata
+   w układzie telefonu. Wystarcza do sterowania przechyłem i działa też tam,
+   gdzie deviceorientation milczy (telefony bez żyroskopu, zablokowane API). */
+const _accUp = new V3(), _accNew = new V3();
+let accInit = false;
+function onMotionEvent(e) {
+  const a = e.accelerationIncludingGravity;
+  tilt.motionEvents++;
+  if (!a || (a.x === null && a.y === null && a.z === null)) { tilt.motionNulls++; return; }
+  const x = a.x || 0, y = a.y || 0, z = a.z || 0;
+  const len = Math.hypot(x, y, z);
+  if (len < 1) return;                                   // swobodny spadek albo śmieci
+  _accNew.set(x / len, y / len, z / len);
+  if (!accInit) { _accUp.copy(_accNew); accInit = true; }
+  else _accUp.lerp(_accNew, 0.16).normalize();           // wygładzenie drgań ręki
+  tilt.acc = [+_accUp.x.toFixed(2), +_accUp.y.toFixed(2), +_accUp.z.toFixed(2)];
+  tilt.angle = screenAngle();
+  // obrót osi urządzenia na osie ekranu
+  let ux, uy;
+  switch (((tilt.angle % 360) + 360) % 360) {
+    case 90: ux = -_accUp.y; uy = _accUp.x; break;
+    case 180: ux = -_accUp.x; uy = -_accUp.y; break;
+    case 270: ux = _accUp.y; uy = -_accUp.x; break;
+    default: ux = _accUp.x; uy = _accUp.y;
+  }
+  applyTilt(Math.asin(clamp(-ux, -1, 1)) / DEG, Math.asin(clamp(-uy, -1, 1)) / DEG, 'akcelerometr');
 }
 function calibrateTilt(quiet) {
   tilt.refRoll = tilt.rawRoll; tilt.refPitch = tilt.rawPitch;
@@ -921,10 +965,12 @@ function calibrateTilt(quiet) {
 function setTilt(on) {
   if (on && !tilt.on) {
     const start = () => {
-      tilt.events = tilt.nulls = 0; tilt.ready = false;
-      /* część przeglądarek podaje przechył tylko w zdarzeniu bezwzględnym */
+      tilt.events = tilt.nulls = tilt.motionEvents = tilt.motionNulls = 0;
+      tilt.ready = false; tilt.source = '—'; tilt.lastOrient = 0; accInit = false;
+      /* trzy źródła naraz — bierzemy to, które faktycznie coś przysyła */
       window.addEventListener('deviceorientation', onTiltEvent);
       window.addEventListener('deviceorientationabsolute', onTiltEvent);
+      window.addEventListener('devicemotion', onMotionEvent);
       tilt.on = true; tilt.refRoll = tilt.refPitch = null;
       document.body.classList.add('gyro');
       paintTiltBtn();
@@ -934,37 +980,49 @@ function setTilt(on) {
          pierwszym prawdziwym odczycie, więc czekanie nic nie psuje. */
       setTimeout(() => {
         if (!tilt.on || tilt.ready) return;
-        tilt.note = tilt.events
-          ? 'przychodzą puste odczyty (×' + tilt.nulls + ') — telefon nie udostępnia czujnika'
-          : 'przeglądarka nie przysyła zdarzeń czujnika';
+        tilt.note = (tilt.events + tilt.motionEvents)
+          ? 'przychodzą puste odczyty (×' + (tilt.nulls + tilt.motionNulls) + ') — telefon nie udostępnia czujników'
+          : 'przeglądarka nie przysyła zdarzeń czujników';
         paintTiltBtn();
         msg('CZEKAM NA CZUJNIK', 'menu → Diagnostyka czujnika przechyłu', 2.6);
       }, 3000);
     };
-    /* iOS 13+ wymaga zgody użytkownika, i to z gestu — stąd włączanie przyciskiem */
-    const DOE = window.DeviceOrientationEvent;
-    if (DOE && typeof DOE.requestPermission === 'function') {
-      tilt.perm = 'pytam...';
-      DOE.requestPermission().then(r => {
-        tilt.perm = r;
-        if (r === 'granted') start();
-        else { tilt.denied = true; tilt.note = 'odmowa dostępu do czujnika'; msg('', 'brak zgody na czujnik przechyłu', 1.8); }
-      }).catch(err => {
-        tilt.perm = 'błąd: ' + (err && err.message ? err.message.slice(0, 40) : '?');
-        tilt.denied = true; tilt.note = 'zgoda musi paść z dotknięcia przycisku';
-        msg('', 'czujnik przechyłu niedostępny', 1.6);
-      });
+    /* iOS 13+ wymaga zgody użytkownika, i to z gestu — stąd włączanie przyciskiem.
+       Pytamy o oba czujniki, bo na części telefonów działa tylko jeden z nich. */
+    const DOE = window.DeviceOrientationEvent, DME = window.DeviceMotionEvent;
+    const ask = (api, field) => {
+      if (!api || typeof api.requestPermission !== 'function') {
+        tilt[field] = api ? 'nie trzeba' : 'brak API';
+        return Promise.resolve(!!api);
+      }
+      tilt[field] = 'pytam...';
+      return api.requestPermission()
+        .then(r => { tilt[field] = r; return r === 'granted'; })
+        .catch(err => {
+          tilt[field] = 'błąd: ' + (err && err.message ? err.message.slice(0, 40) : '?');
+          return false;
+        });
+    };
+    if (!DOE && !DME) {
+      tilt.note = 'przeglądarka nie zna czujników ruchu';
+      msg('BRAK CZUJNIKA', 'ta przeglądarka nie udostępnia czujników', 2.2);
+      paintTiltBtn();
     } else {
-      tilt.perm = window.DeviceOrientationEvent ? 'nie trzeba' : 'brak DeviceOrientationEvent';
-      if (!window.DeviceOrientationEvent) {
-        tilt.note = 'przeglądarka nie zna DeviceOrientationEvent';
-        msg('BRAK CZUJNIKA', 'ta przeglądarka nie ma czujnika przechyłu', 2.2);
-      } else start();
+      Promise.all([ask(DOE, 'perm'), ask(DME, 'motionPerm')]).then(oks => {
+        if (oks[0] || oks[1]) start();
+        else {
+          tilt.denied = true;
+          tilt.note = 'odmowa dostępu do czujników ruchu';
+          paintTiltBtn();
+          msg('', 'brak zgody na czujnik przechyłu', 1.8);
+        }
+      });
     }
   } else if (!on && tilt.on) {
     window.removeEventListener('deviceorientation', onTiltEvent);
     window.removeEventListener('deviceorientationabsolute', onTiltEvent);
-    tilt.on = false; tilt.ready = false; tilt.roll = tilt.pitch = 0;
+    window.removeEventListener('devicemotion', onMotionEvent);
+    tilt.on = false; tilt.ready = false; tilt.roll = tilt.pitch = 0; tilt.note = '';
     document.body.classList.remove('gyro');
     msg('', 'żyroskop wyłączony', 1);
   }
@@ -1879,11 +1937,17 @@ function diagLines() {
   const since = tilt.lastEvent ? Math.round(performance.now() - tilt.lastEvent) : null;
   const DOE = window.DeviceOrientationEvent;
   return [
-    ['DeviceOrientationEvent', DOE ? 'jest' : 'BRAK', !!DOE],
-    ['zgoda (iOS)', tilt.perm, tilt.perm === 'granted' || tilt.perm === 'nie trzeba'],
+    ['API orientacji / ruchu', (DOE ? 'jest' : 'BRAK') + ' / ' + (window.DeviceMotionEvent ? 'jest' : 'BRAK'),
+      !!DOE || !!window.DeviceMotionEvent],
+    ['zgoda orientacja / ruch', tilt.perm + ' / ' + tilt.motionPerm,
+      tilt.perm === 'granted' || tilt.perm === 'nie trzeba' ||
+      tilt.motionPerm === 'granted' || tilt.motionPerm === 'nie trzeba'],
     ['żyroskop włączony', tilt.on ? 'TAK' : 'nie', tilt.on],
-    ['odczyty przychodzą', tilt.ready ? 'TAK' : 'NIE', tilt.ready],
-    ['zdarzeń / pustych', tilt.events + ' / ' + tilt.nulls, tilt.events > 0 && tilt.nulls === 0],
+    ['odczyty przychodzą', tilt.ready ? 'TAK, z: ' + tilt.source : 'NIE', tilt.ready],
+    ['orientacja: zdarzeń / pustych', tilt.events + ' / ' + tilt.nulls, tilt.events > 0 && tilt.nulls === 0],
+    ['ruch: zdarzeń / pustych', tilt.motionEvents + ' / ' + tilt.motionNulls,
+      tilt.motionEvents > 0 && tilt.motionNulls === 0],
+    ['grawitacja (x/y/z)', tilt.acc.join(' / '), tilt.motionEvents > 0],
     ['ostatnie zdarzenie', since === null ? '—' : since + ' ms temu', since !== null && since < 1500],
     ['alpha / beta / gamma', num(tilt.alpha) + ' / ' + num(tilt.beta) + ' / ' + num(tilt.gamma),
       tilt.beta !== null && tilt.beta !== undefined],
