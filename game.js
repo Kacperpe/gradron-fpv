@@ -865,7 +865,9 @@ const tilt = {
   on: false, ready: false, denied: false,
   range: Number(localStorage.getItem('gradron.tiltrange')) || 28,   // stopnie do wychylenia max
   roll: 0, pitch: 0,                                               // -1..1 po kalibracji
-  refRoll: null, refPitch: null, rawRoll: 0, rawPitch: 0, lastEvent: 0
+  refRoll: null, refPitch: null, rawRoll: 0, rawPitch: 0, lastEvent: 0,
+  // pola tylko do diagnostyki na żywym telefonie (menu → Diagnostyka czujnika)
+  events: 0, perm: 'nie pytano', note: '', alpha: 0, beta: 0, gamma: 0, angle: 0, nulls: 0
 };
 const TILT_RANGES = [18, 28, 40];
 
@@ -891,9 +893,14 @@ function tiltAxes(e) {
   };
 }
 function onTiltEvent(e) {
-  if (e.beta === null && e.gamma === null) return;
+  tilt.events++;
+  tilt.alpha = e.alpha; tilt.beta = e.beta; tilt.gamma = e.gamma;
+  tilt.angle = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle : (window.orientation || 0);
+  if (e.beta === null && e.gamma === null) { tilt.nulls++; return; }
   const ax = tiltAxes(e);
-  tilt.ready = true; tilt.lastEvent = performance.now();
+  if (!tilt.ready) { tilt.ready = true; tilt.note = ''; paintTiltBtn(); }
+  tilt.lastEvent = performance.now();
   tilt.rawRoll = ax.roll; tilt.rawPitch = ax.pitch;
   if (tilt.refRoll === null) { tilt.refRoll = ax.roll; tilt.refPitch = ax.pitch; }
   const dead = 1.6;
@@ -914,31 +921,63 @@ function calibrateTilt(quiet) {
 function setTilt(on) {
   if (on && !tilt.on) {
     const start = () => {
+      tilt.events = tilt.nulls = 0; tilt.ready = false;
+      /* część przeglądarek podaje przechył tylko w zdarzeniu bezwzględnym */
       window.addEventListener('deviceorientation', onTiltEvent);
+      window.addEventListener('deviceorientationabsolute', onTiltEvent);
       tilt.on = true; tilt.refRoll = tilt.refPitch = null;
       document.body.classList.add('gyro');
+      paintTiltBtn();
       msg('ŻYROSKOP', 'przechylaj telefon jak kierownicę', 1.6);
+      /* Nie wyłączamy żyroskopu, gdy pierwsze odczyty nie przyjdą od razu — część
+         telefonów budzi czujnik kilka sekund. Sterowanie i tak rusza dopiero przy
+         pierwszym prawdziwym odczycie, więc czekanie nic nie psuje. */
       setTimeout(() => {
-        if (tilt.on && !tilt.ready) { setTilt(false); msg('', 'brak czujnika przechyłu', 1.6); }
-      }, 1800);
+        if (!tilt.on || tilt.ready) return;
+        tilt.note = tilt.events
+          ? 'przychodzą puste odczyty (×' + tilt.nulls + ') — telefon nie udostępnia czujnika'
+          : 'przeglądarka nie przysyła zdarzeń czujnika';
+        paintTiltBtn();
+        msg('CZEKAM NA CZUJNIK', 'menu → Diagnostyka czujnika przechyłu', 2.6);
+      }, 3000);
     };
     /* iOS 13+ wymaga zgody użytkownika, i to z gestu — stąd włączanie przyciskiem */
     const DOE = window.DeviceOrientationEvent;
     if (DOE && typeof DOE.requestPermission === 'function') {
+      tilt.perm = 'pytam...';
       DOE.requestPermission().then(r => {
+        tilt.perm = r;
         if (r === 'granted') start();
-        else { tilt.denied = true; msg('', 'brak zgody na czujnik przechyłu', 1.8); }
-      }).catch(() => { tilt.denied = true; msg('', 'czujnik przechyłu niedostępny', 1.6); });
-    } else start();
+        else { tilt.denied = true; tilt.note = 'odmowa dostępu do czujnika'; msg('', 'brak zgody na czujnik przechyłu', 1.8); }
+      }).catch(err => {
+        tilt.perm = 'błąd: ' + (err && err.message ? err.message.slice(0, 40) : '?');
+        tilt.denied = true; tilt.note = 'zgoda musi paść z dotknięcia przycisku';
+        msg('', 'czujnik przechyłu niedostępny', 1.6);
+      });
+    } else {
+      tilt.perm = window.DeviceOrientationEvent ? 'nie trzeba' : 'brak DeviceOrientationEvent';
+      if (!window.DeviceOrientationEvent) {
+        tilt.note = 'przeglądarka nie zna DeviceOrientationEvent';
+        msg('BRAK CZUJNIKA', 'ta przeglądarka nie ma czujnika przechyłu', 2.2);
+      } else start();
+    }
   } else if (!on && tilt.on) {
     window.removeEventListener('deviceorientation', onTiltEvent);
+    window.removeEventListener('deviceorientationabsolute', onTiltEvent);
     tilt.on = false; tilt.ready = false; tilt.roll = tilt.pitch = 0;
     document.body.classList.remove('gyro');
     msg('', 'żyroskop wyłączony', 1);
   }
-  const b = el('tb-gyro');
-  if (b) b.classList.toggle('on', tilt.on);
+  paintTiltBtn();
   try { localStorage.setItem('gradron.tilt', tilt.on ? '1' : '0'); } catch (e) { }
+}
+function paintTiltBtn() {
+  const b = el('tb-gyro');
+  if (!b) return;
+  b.classList.toggle('on', tilt.on && tilt.ready);
+  b.classList.toggle('wait', tilt.on && !tilt.ready && !tilt.note);
+  b.classList.toggle('err', !!tilt.note && !tilt.ready);
+  b.textContent = tilt.on ? (tilt.ready ? 'Żyro' : tilt.note ? 'Żyro?' : '…') : 'Żyro';
 }
 function cycleTiltRange(d) {
   let i = TILT_RANGES.indexOf(tilt.range);
@@ -1718,7 +1757,12 @@ tbtn('tb-full', () => toggleFull());
     if (!held) setTilt(!tilt.on);
   });
   b.addEventListener('pointercancel', () => clearTimeout(timer));
-  b.addEventListener('click', e => e.preventDefault());
+  /* zapasowa ścieżka: gdyby przeglądarka nie dała pointerup (bywa na iOS),
+     zgodę na czujnik i tak pytamy z prawdziwego kliknięcia */
+  b.addEventListener('click', e => {
+    e.preventDefault();
+    if (!tilt.on && tilt.perm === 'nie pytano') setTilt(true);
+  });
 })();
 
 const startHint = document.querySelector('#start .key-hint');
@@ -1824,6 +1868,57 @@ el('rot-ok').addEventListener('click', () => {
   try { localStorage.setItem('gradron.rotate', 'off'); } catch (e) { }
   updateRotateHint();
 });
+
+/* ---------- podgląd czujnika przechyłu ----------
+   Emulator nie zastąpi prawdziwego telefonu, więc niech telefon sam powie, co dostaje:
+   czy zdarzenia w ogóle przychodzą, jakie mają wartości i co z nich wychodzi. */
+const diagEl = el('diag'), diagRows = el('diag-rows');
+let diagOpen = false;
+const num = v => (v === null || v === undefined) ? 'null' : (+v).toFixed(1);
+function diagLines() {
+  const since = tilt.lastEvent ? Math.round(performance.now() - tilt.lastEvent) : null;
+  const DOE = window.DeviceOrientationEvent;
+  return [
+    ['DeviceOrientationEvent', DOE ? 'jest' : 'BRAK', !!DOE],
+    ['zgoda (iOS)', tilt.perm, tilt.perm === 'granted' || tilt.perm === 'nie trzeba'],
+    ['żyroskop włączony', tilt.on ? 'TAK' : 'nie', tilt.on],
+    ['odczyty przychodzą', tilt.ready ? 'TAK' : 'NIE', tilt.ready],
+    ['zdarzeń / pustych', tilt.events + ' / ' + tilt.nulls, tilt.events > 0 && tilt.nulls === 0],
+    ['ostatnie zdarzenie', since === null ? '—' : since + ' ms temu', since !== null && since < 1500],
+    ['alpha / beta / gamma', num(tilt.alpha) + ' / ' + num(tilt.beta) + ' / ' + num(tilt.gamma),
+      tilt.beta !== null && tilt.beta !== undefined],
+    ['kąt ekranu', tilt.angle + '°', true],
+    ['przechył surowy', num(tilt.rawRoll) + '° / ' + num(tilt.rawPitch) + '°', tilt.ready],
+    ['punkt zerowy', tilt.refRoll === null ? 'nieustawiony' : num(tilt.refRoll) + '° / ' + num(tilt.refPitch) + '°',
+      tilt.refRoll !== null],
+    ['wyjście roll / pitch', tilt.roll.toFixed(2) + ' / ' + tilt.pitch.toFixed(2), tilt.ready],
+    ['drążki roll / pitch', stick.roll.toFixed(2) + ' / ' + stick.pitch.toFixed(2), true],
+    ['drążki dotykowe', touch.enabled ? (touch.active ? 'ON, używane' : 'ON, nietknięte') : 'OFF', touch.enabled],
+    ['ekran / połączenie', device + ' / ' + (window.isSecureContext ? 'https' : 'HTTP — czujnik zablokowany'),
+      window.isSecureContext],
+    ['uwaga', tilt.note || '—', !tilt.note]
+  ];
+}
+function paintDiag() {
+  if (!diagOpen) return;
+  diagRows.innerHTML = '';
+  for (const row of diagLines()) {
+    const d = document.createElement('div');
+    d.className = 'd ' + (row[2] ? 'ok' : 'bad');
+    d.innerHTML = '<span></span><b></b>';
+    d.firstElementChild.textContent = row[0];
+    d.lastElementChild.textContent = row[1];
+    diagRows.appendChild(d);
+  }
+}
+function setDiag(on) {
+  diagOpen = !!on;
+  diagEl.classList.toggle('hidden', !diagOpen);
+  paintDiag();
+}
+el('diag-close').addEventListener('click', () => setDiag(false));
+setInterval(() => { if (diagOpen) paintDiag(); }, 250);
+if (/[?&]diag/.test(location.search)) setDiag(true);
 
 fitView();
 /* zapamiętany żyroskop wracamy tylko tam, gdzie nie trzeba pytać o zgodę z gestu (Android);
@@ -1932,6 +2027,7 @@ const MENU = [
     act: () => setTilt(!tilt.on), adj: d => { if (tilt.on) cycleTiltRange(d); else setTilt(true); }
   },
   { label: 'Wyzeruj przechył (trzymaj telefon jak do lotu)', act: () => calibrateTilt() },
+  { label: 'Diagnostyka czujnika przechyłu', act: () => { setDiag(true); closeMenu(); } },
   {
     label: 'Prędkość wiatru',
     val: () => st.windSpeed ? st.windSpeed + ' m/s  (' + Math.round(st.windSpeed * 3.6) + ' km/h)' : 'OFF',

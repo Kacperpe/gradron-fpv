@@ -222,6 +222,25 @@
   body.gyro #tpad-r { opacity: .5; }
   body.gyro #tpad-r em::after { content: " · żyro"; }
 
+  .tbtn.wait { border-color: rgba(255,207,92,.7); color: #ffcf5c; }
+  .tbtn.err { border-color: rgba(255,111,111,.7); color: #ff6f6f; }
+
+  /* podgląd czujnika przechyłu (menu → Diagnostyka czujnika / ?diag) */
+  #diag { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    z-index: 13; width: min(420px, 92vw); max-height: 86vh; overflow: auto; padding: 16px 18px;
+    border: 1px solid rgba(126,247,192,.4); border-radius: 10px; background: rgba(6,12,15,.95);
+    font: 400 12px/1.5 ui-monospace, monospace; color: #d8f5e0; }
+  #diag.hidden { display: none; }
+  #diag h3 { margin: 0 0 10px; font: 700 12px/1 ui-monospace, monospace; letter-spacing: 2px;
+    text-transform: uppercase; color: #7ef7c0; }
+  #diag .d { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0;
+    border-bottom: 1px dashed rgba(234,255,240,.12); }
+  #diag .d b { font-weight: 700; color: #eafff0; text-align: right; word-break: break-word; }
+  #diag .d.ok b { color: #7ef7c0; } #diag .d.bad b { color: #ff6f6f; }
+  #diag-close { width: 100%; margin-top: 12px; padding: 11px; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgba(126,247,192,.45); background: rgba(126,247,192,.12); color: #7ef7c0;
+    font: 700 11px/1 ui-monospace, monospace; letter-spacing: 1.4px; text-transform: uppercase; }
+
   /* podpowiedź o obróceniu telefonu */
   #rotate { position: fixed; inset: 0; z-index: 12; display: flex; align-items: center;
     justify-content: center; padding: 24px; text-align: center;
@@ -308,6 +327,12 @@
   </div>
   <div class="tpad" id="tpad-l"><div class="knob"></div><em>gaz / yaw</em></div>
   <div class="tpad" id="tpad-r"><div class="knob"></div><em>pitch / roll</em></div>
+</div>
+
+<div id="diag" class="hidden">
+  <h3>Czujnik przechyłu — podgląd</h3>
+  <div id="diag-rows"></div>
+  <button id="diag-close" type="button">Zamknij</button>
 </div>
 
 <div id="rotate" class="hidden">
