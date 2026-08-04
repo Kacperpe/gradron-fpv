@@ -863,7 +863,9 @@ function touchThrottle() {
    telefonu w chwili włączenia, więc można grać leżąc czy w fotelu. */
 const tilt = {
   on: false, ready: false, denied: false,
-  range: Number(localStorage.getItem('gradron.tiltrange')) || 28,   // stopnie do wychylenia max
+  range: Number(localStorage.getItem('gradron.tiltrange')) || 25,   // stopnie do pełnego wychylenia
+  invPitch: localStorage.getItem('gradron.tiltinvp') === '1',
+  invRoll: localStorage.getItem('gradron.tiltinvr') === '1',
   roll: 0, pitch: 0,                                               // -1..1 po kalibracji
   refRoll: null, refPitch: null, rawRoll: 0, rawPitch: 0, lastEvent: 0,
   source: '—', lastBy: {}, blocked: false, sensorApi: 'nie próbowano', sensor: null,
@@ -871,7 +873,12 @@ const tilt = {
   events: 0, perm: 'nie pytano', note: '', alpha: 0, beta: 0, gamma: 0, angle: 0, nulls: 0,
   motionEvents: 0, motionNulls: 0, motionPerm: 'nie pytano', acc: [0, 0, 0]
 };
-const TILT_RANGES = [18, 28, 40];
+/* mniejszy kąt = dron reaguje mocniej na drobne pochylenie telefonu */
+const TILT_RANGES = [10, 14, 18, 22, 25, 30, 36, 45];
+function tiltFeel() {
+  return tilt.range <= 14 ? 'bardzo czuła' : tilt.range <= 20 ? 'czuła'
+    : tilt.range <= 30 ? 'średnia' : 'spokojna';
+}
 
 /* Z alpha/beta/gamma budujemy kwaternion telefonu (kolejność YXZ, jak w three.js),
    uwzględniamy obrót ekranu i pytamy, gdzie w układzie ekranu leży pion świata.
@@ -889,9 +896,17 @@ function tiltAxes(e) {
   _tq.multiply(_tqFlip);                                        // ekran patrzy na gracza
   _tq.multiply(_tqScreen.setFromAxisAngle(_tZ, -angle * DEG));   // obrót ekranu telefonu
   _tUp.set(0, 1, 0).applyQuaternion(_tq.conjugate());            // pion świata w układzie ekranu
+  return anglesFromUp(_tUp.x, _tUp.y, _tUp.z);
+}
+
+/* Pion świata w układzie ekranu → kąty przechyłu.
+   atan2 (a nie asin) daje kąt, który rośnie równomiernie także wtedy, gdy telefon
+   trzymamy blisko pionu — przy asin sterowanie w tej pozycji robiło się nadwrażliwe
+   i potrafiło utknąć na maksymalnym wychyleniu. */
+function anglesFromUp(ux, uy, uz) {
   return {
-    roll: Math.asin(clamp(-_tUp.x, -1, 1)) / DEG,     // dodatnie = prawa krawędź w dół
-    pitch: Math.asin(clamp(-_tUp.y, -1, 1)) / DEG     // dodatnie = górna krawędź w dół
+    roll: Math.atan2(-ux, uz) / DEG,       // dodatnie = prawa krawędź ekranu w dół
+    pitch: Math.atan2(-uy, uz) / DEG       // dodatnie = górna krawędź ekranu w dół
   };
 }
 /* wspólne wejście dla wszystkich czujników: kąty już w układzie ekranu.
@@ -910,13 +925,16 @@ function applyTilt(rollDeg, pitchDeg, source) {
   if (tilt.refRoll === null) { tilt.refRoll = rollDeg; tilt.refPitch = pitchDeg; }
   const dead = 1.6;
   const norm = (v, ref) => {
-    let d = v - ref;
+    let d = ((v - ref + 540) % 360) - 180;        // najkrótsza różnica kątów, bez skoku na ±180°
     if (Math.abs(d) < dead) return 0;
     d -= Math.sign(d) * dead;
     return clamp(d / tilt.range, -1, 1);
   };
-  tilt.roll = norm(rollDeg, tilt.refRoll);        // prawa krawędź w dół = przechył w prawo
-  tilt.pitch = -norm(pitchDeg, tilt.refPitch);    // górna krawędź w dół = nos w dół
+  /* W tej grze dodatni drążek pitch podnosi nos (sprawdzone: ↑ daje fwd.y > 0),
+     a pochylenie telefonu do przodu ma posyłać drona do przodu — czyli nos w dół.
+     Stąd minus przy pitchu. */
+  tilt.roll = (tilt.invRoll ? -1 : 1) * norm(rollDeg, tilt.refRoll);
+  tilt.pitch = (tilt.invPitch ? 1 : -1) * norm(pitchDeg, tilt.refPitch);
 }
 function screenAngle() {
   return (screen.orientation && typeof screen.orientation.angle === 'number')
@@ -958,7 +976,8 @@ function onMotionEvent(e) {
     case 270: ux = _accUp.y; uy = -_accUp.x; break;
     default: ux = _accUp.x; uy = _accUp.y;
   }
-  applyTilt(Math.asin(clamp(-ux, -1, 1)) / DEG, Math.asin(clamp(-uy, -1, 1)) / DEG, 'akcelerometr');
+  const kat = anglesFromUp(ux, uy, _accUp.z);
+  applyTilt(kat.roll, kat.pitch, 'akcelerometr');
 }
 
 /* Trzecie podejście: Generic Sensor API. Odczyty w układzie ekranu dostajemy
@@ -976,8 +995,8 @@ function startSensorApi() {
       if (!sensInit) { _sensUp.copy(_sensNew); sensInit = true; }
       else _sensUp.lerp(_sensNew, 0.16).normalize();
       tilt.sensorApi = 'czyta';
-      applyTilt(Math.asin(clamp(-_sensUp.x, -1, 1)) / DEG,
-        Math.asin(clamp(-_sensUp.y, -1, 1)) / DEG, 'sensor API');
+      const a = anglesFromUp(_sensUp.x, _sensUp.y, _sensUp.z);
+      applyTilt(a.roll, a.pitch, 'sensor API');
     });
     s.addEventListener('error', ev => {
       tilt.sensorApi = 'błąd: ' + ((ev.error && ev.error.name) || '?');
@@ -1088,11 +1107,27 @@ function paintTiltBtn() {
 }
 function cycleTiltRange(d) {
   let i = TILT_RANGES.indexOf(tilt.range);
-  if (i < 0) i = 1;
-  i = (i + (d || 1) + TILT_RANGES.length) % TILT_RANGES.length;
+  if (i < 0) {                                   // zapisana wartość spoza listy — bierzemy najbliższą
+    i = 0;
+    for (let k = 1; k < TILT_RANGES.length; k++)
+      if (Math.abs(TILT_RANGES[k] - tilt.range) < Math.abs(TILT_RANGES[i] - tilt.range)) i = k;
+  }
+  // krok w prawo = czulej, więc idziemy w stronę mniejszych kątów
+  i = clamp(i - (d || 1), 0, TILT_RANGES.length - 1);
   tilt.range = TILT_RANGES[i];
   try { localStorage.setItem('gradron.tiltrange', String(tilt.range)); } catch (e) { }
-  msg('', 'czułość przechyłu ' + tilt.range + '°', 0.9);
+  msg('', 'czułość przechyłu: ' + tiltFeel() + ' (pełne wychylenie przy ' + tilt.range + '°)', 1.2);
+}
+function toggleTiltInvert(axis) {
+  if (axis === 'roll') {
+    tilt.invRoll = !tilt.invRoll;
+    try { localStorage.setItem('gradron.tiltinvr', tilt.invRoll ? '1' : '0'); } catch (e) { }
+    msg('', 'przechył w bok ' + (tilt.invRoll ? 'odwrócony' : 'normalny'), 1);
+  } else {
+    tilt.invPitch = !tilt.invPitch;
+    try { localStorage.setItem('gradron.tiltinvp', tilt.invPitch ? '1' : '0'); } catch (e) { }
+    msg('', 'pochylanie ' + (tilt.invPitch ? 'odwrócone' : 'normalne'), 1);
+  }
 }
 
 function readInput(dt) {
@@ -2148,8 +2183,21 @@ const MENU = [
     act: () => { cycleUiMode(1); paintMenu(); }, adj: d => { cycleUiMode(d); paintMenu(); }
   },
   {
-    label: 'Sterowanie przechyłem telefonu', val: () => tilt.on ? 'ON · ' + tilt.range + '°' : 'OFF',
-    act: () => setTilt(!tilt.on), adj: d => { if (tilt.on) cycleTiltRange(d); else setTilt(true); }
+    label: 'Sterowanie przechyłem telefonu', val: () => tilt.on ? 'ON' : 'OFF',
+    act: () => setTilt(!tilt.on), adj: () => setTilt(!tilt.on)
+  },
+  {
+    label: 'Czułość przechyłu  (← spokojniej · czulej →)',
+    val: () => tiltFeel() + '  ·  ' + tilt.range + '°',
+    act: () => { cycleTiltRange(1); paintMenu(); }, adj: d => { cycleTiltRange(d); paintMenu(); }
+  },
+  {
+    label: 'Pochylanie do przodu = lot do przodu', val: () => tilt.invPitch ? 'ODWRÓCONE' : 'NORMALNE',
+    act: () => toggleTiltInvert('pitch'), adj: () => toggleTiltInvert('pitch')
+  },
+  {
+    label: 'Przechył w bok', val: () => tilt.invRoll ? 'ODWRÓCONY' : 'NORMALNY',
+    act: () => toggleTiltInvert('roll'), adj: () => toggleTiltInvert('roll')
   },
   { label: 'Wyzeruj przechył (trzymaj telefon jak do lotu)', act: () => calibrateTilt() },
   { label: 'Diagnostyka czujnika przechyłu', act: () => { setDiag(true); closeMenu(); } },
@@ -2293,7 +2341,7 @@ if (/[?&]auto/.test(location.search)) {
   window.__gd = {
     st, stick, gates, THREE, camera, colliders, inSolid, physics,
     renderer, scene, groundMap, concreteMap,
-    setMap, cycleMap, cycleNav, navTarget, updateSignal, touch, tilt, FOV, setDiag, setTilt,
+    setMap, cycleMap, cycleNav, navTarget, updateSignal, touch, tilt, FOV, setDiag, setTilt, calibrateTilt,
     get activeMap() { return activeMap; }, get device() { return device; },
     get builtMaps() { return builtMaps; }
   }; // hook do testów
