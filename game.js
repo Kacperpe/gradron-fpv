@@ -1105,15 +1105,19 @@ function paintTiltBtn() {
   b.classList.toggle('err', !!tilt.note && !tilt.ready);
   b.textContent = tilt.on ? (tilt.ready ? 'Żyro' : tilt.note ? 'Żyro?' : '…') : 'Żyro';
 }
-function cycleTiltRange(d) {
+/* wrap=true dla dotknięcia pozycji w menu (jedyny kierunek, jaki daje dotyk, więc
+   po najczulszym ustawieniu musi wrócić na początek), wrap=false dla strzałek ← → */
+function cycleTiltRange(d, wrap) {
+  const n = TILT_RANGES.length;
   let i = TILT_RANGES.indexOf(tilt.range);
   if (i < 0) {                                   // zapisana wartość spoza listy — bierzemy najbliższą
     i = 0;
-    for (let k = 1; k < TILT_RANGES.length; k++)
+    for (let k = 1; k < n; k++)
       if (Math.abs(TILT_RANGES[k] - tilt.range) < Math.abs(TILT_RANGES[i] - tilt.range)) i = k;
   }
   // krok w prawo = czulej, więc idziemy w stronę mniejszych kątów
-  i = clamp(i - (d || 1), 0, TILT_RANGES.length - 1);
+  i -= (d || 1);
+  i = wrap ? ((i % n) + n) % n : clamp(i, 0, n - 1);
   tilt.range = TILT_RANGES[i];
   try { localStorage.setItem('gradron.tiltrange', String(tilt.range)); } catch (e) { }
   msg('', 'czułość przechyłu: ' + tiltFeel() + ' (pełne wychylenie przy ' + tilt.range + '°)', 1.2);
@@ -2189,7 +2193,8 @@ const MENU = [
   {
     label: 'Czułość przechyłu  (← spokojniej · czulej →)',
     val: () => tiltFeel() + '  ·  ' + tilt.range + '°',
-    act: () => { cycleTiltRange(1); paintMenu(); }, adj: d => { cycleTiltRange(d); paintMenu(); }
+    act: () => { cycleTiltRange(1, true); paintMenu(); },
+    adj: d => { cycleTiltRange(d, false); paintMenu(); }
   },
   {
     label: 'Pochylanie do przodu = lot do przodu', val: () => tilt.invPitch ? 'ODWRÓCONE' : 'NORMALNE',
