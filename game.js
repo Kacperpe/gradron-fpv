@@ -32,6 +32,8 @@ const SKY_BOT = new THREE.Color(0xbcd6e4);
 scene.fog = new THREE.Fog(0xa8c4d6, 140, 620);
 
 const camera = new THREE.PerspectiveCamera(105, window.innerWidth / window.innerHeight, 0.08, 2200);
+/* pionowe pole widzenia dla obu kamer — przelicza je fitView() pod proporcje ekranu */
+const FOV = { fpv: 105, tpp: 74 };
 
 /* niebo — gradientowa kopuła ze słońcem */
 const SUN_DIR = new V3(-0.45, 0.62, 0.64).normalize();
@@ -855,12 +857,106 @@ function touchThrottle() {
   return clamp01(v >= 0 ? HOVER_T + v * (1 - HOVER_T) : HOVER_T * (1 + v));
 }
 
+/* ---------- żyroskop: sterowanie przechyłem telefonu ----------
+   Telefon trzymany poziomo jest "kierownicą": przechylenie w bok daje roll,
+   pochylenie do siebie / od siebie daje pitch. Punkt zerowy bierzemy z pozycji
+   telefonu w chwili włączenia, więc można grać leżąc czy w fotelu. */
+const tilt = {
+  on: false, ready: false, denied: false,
+  range: Number(localStorage.getItem('gradron.tiltrange')) || 28,   // stopnie do wychylenia max
+  roll: 0, pitch: 0,                                               // -1..1 po kalibracji
+  refRoll: null, refPitch: null, rawRoll: 0, rawPitch: 0, lastEvent: 0
+};
+const TILT_RANGES = [18, 28, 40];
+
+/* Z alpha/beta/gamma budujemy kwaternion telefonu (kolejność YXZ, jak w three.js),
+   uwzględniamy obrót ekranu i pytamy, gdzie w układzie ekranu leży pion świata.
+   To daje kąty przechyłu odporne na obrót telefonu i na gimbal lock surowych osi. */
+const _tq = new THREE.Quaternion(), _te = new THREE.Euler();
+const _tqScreen = new THREE.Quaternion();
+const _tqFlip = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);   // -90° wokół X
+const _tUp = new V3(), _tZ = new V3(0, 0, 1);
+function tiltAxes(e) {
+  const a = ((e.alpha || 0)) * DEG, b = ((e.beta || 0)) * DEG, g = ((e.gamma || 0)) * DEG;
+  const angle = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle : (window.orientation || 0);
+  _te.set(b, a, -g, 'YXZ');
+  _tq.setFromEuler(_te);
+  _tq.multiply(_tqFlip);                                        // ekran patrzy na gracza
+  _tq.multiply(_tqScreen.setFromAxisAngle(_tZ, -angle * DEG));   // obrót ekranu telefonu
+  _tUp.set(0, 1, 0).applyQuaternion(_tq.conjugate());            // pion świata w układzie ekranu
+  return {
+    roll: Math.asin(clamp(-_tUp.x, -1, 1)) / DEG,     // dodatnie = prawa krawędź w dół
+    pitch: Math.asin(clamp(-_tUp.y, -1, 1)) / DEG     // dodatnie = górna krawędź w dół
+  };
+}
+function onTiltEvent(e) {
+  if (e.beta === null && e.gamma === null) return;
+  const ax = tiltAxes(e);
+  tilt.ready = true; tilt.lastEvent = performance.now();
+  tilt.rawRoll = ax.roll; tilt.rawPitch = ax.pitch;
+  if (tilt.refRoll === null) { tilt.refRoll = ax.roll; tilt.refPitch = ax.pitch; }
+  const dead = 1.6;
+  const norm = (v, ref) => {
+    let d = v - ref;
+    if (Math.abs(d) < dead) return 0;
+    d -= Math.sign(d) * dead;
+    return clamp(d / tilt.range, -1, 1);
+  };
+  tilt.roll = norm(ax.roll, tilt.refRoll);        // prawa krawędź w dół = przechył w prawo
+  tilt.pitch = -norm(ax.pitch, tilt.refPitch);    // górna krawędź w dół = nos w dół
+}
+function calibrateTilt(quiet) {
+  tilt.refRoll = tilt.rawRoll; tilt.refPitch = tilt.rawPitch;
+  tilt.roll = tilt.pitch = 0;
+  if (!quiet) msg('', 'żyroskop wyzerowany', 1);
+}
+function setTilt(on) {
+  if (on && !tilt.on) {
+    const start = () => {
+      window.addEventListener('deviceorientation', onTiltEvent);
+      tilt.on = true; tilt.refRoll = tilt.refPitch = null;
+      document.body.classList.add('gyro');
+      msg('ŻYROSKOP', 'przechylaj telefon jak kierownicę', 1.6);
+      setTimeout(() => {
+        if (tilt.on && !tilt.ready) { setTilt(false); msg('', 'brak czujnika przechyłu', 1.6); }
+      }, 1800);
+    };
+    /* iOS 13+ wymaga zgody użytkownika, i to z gestu — stąd włączanie przyciskiem */
+    const DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === 'function') {
+      DOE.requestPermission().then(r => {
+        if (r === 'granted') start();
+        else { tilt.denied = true; msg('', 'brak zgody na czujnik przechyłu', 1.8); }
+      }).catch(() => { tilt.denied = true; msg('', 'czujnik przechyłu niedostępny', 1.6); });
+    } else start();
+  } else if (!on && tilt.on) {
+    window.removeEventListener('deviceorientation', onTiltEvent);
+    tilt.on = false; tilt.ready = false; tilt.roll = tilt.pitch = 0;
+    document.body.classList.remove('gyro');
+    msg('', 'żyroskop wyłączony', 1);
+  }
+  const b = el('tb-gyro');
+  if (b) b.classList.toggle('on', tilt.on);
+  try { localStorage.setItem('gradron.tilt', tilt.on ? '1' : '0'); } catch (e) { }
+}
+function cycleTiltRange(d) {
+  let i = TILT_RANGES.indexOf(tilt.range);
+  if (i < 0) i = 1;
+  i = (i + (d || 1) + TILT_RANGES.length) % TILT_RANGES.length;
+  tilt.range = TILT_RANGES[i];
+  try { localStorage.setItem('gradron.tiltrange', String(tilt.range)); } catch (e) { }
+  msg('', 'czułość przechyłu ' + tilt.range + '°', 0.9);
+}
+
 function readInput(dt) {
-  if (touch.enabled && touch.active) {
+  if (touch.enabled && (touch.active || (tilt.on && tilt.ready))) {
     stick.thr = touchThrottle();
     stick.yaw = toward(stick.yaw, touch.l.x, 24, 24, dt);
-    stick.roll = toward(stick.roll, touch.r.x, 24, 24, dt);
-    stick.pitch = toward(stick.pitch, touch.r.y, 24, 24, dt);
+    // przechył telefonu prowadzi pitch/roll, ale dotknięcie prawego drążka ma pierwszeństwo
+    const useTilt = tilt.on && tilt.ready && touch.r.id === null;
+    stick.roll = toward(stick.roll, useTilt ? tilt.roll : touch.r.x, 24, 24, dt);
+    stick.pitch = toward(stick.pitch, useTilt ? tilt.pitch : touch.r.y, 24, 24, dt);
     return;
   }
   if (pad.connected && pad.active) {
@@ -1258,14 +1354,14 @@ function clampCam(p) {
 
 function updateCamera(dt) {
   if (st.camMode === 'FPV') {
-    if (camera.fov !== 105) { camera.fov = 105; camera.updateProjectionMatrix(); }
+    if (camera.fov !== FOV.fpv) { camera.fov = FOV.fpv; camera.updateProjectionMatrix(); }
     drone.visible = false;
     const q = st.quat.clone().multiply(_q.setFromAxisAngle(_v.set(1, 0, 0), st.camTilt));
     camera.quaternion.copy(q);
     camera.position.copy(st.pos).add(_v.set(0, 0.055, -0.02).applyQuaternion(st.quat));
   } else {
     // widok z 3. osoby: kamera zawsze pionowo (nie kręci się z rollem), za dronem, po jego kursie
-    if (camera.fov !== 74) { camera.fov = 74; camera.updateProjectionMatrix(); }
+    if (camera.fov !== FOV.tpp) { camera.fov = FOV.tpp; camera.updateProjectionMatrix(); }
     drone.visible = true;
     _fwd.set(0, 0, -1).applyQuaternion(st.quat);
     _fwd.y *= 0.4;                                  // przy pionowym nosie kamera nie ucieka nad/pod drona
@@ -1493,13 +1589,14 @@ function updateOSD(dt) {
       (st.signalBlocked ? '  ·  LOS×' + st.signalBlocked : '');
     fSignal.className = 'mid ' + (lq < 25 ? 'bad' : lq < 55 ? 'warn' : '');
   }
-  fPad.textContent = touch.enabled && touch.active
-    ? 'DOTYK • GAZ ' + (st.padThr === 'SPUSTKI' ? 'HOVER' : st.padThr)
+  fPad.textContent = touch.enabled && (touch.active || tilt.on)
+    ? (tilt.on && tilt.ready ? 'PRZECHYŁ • ' : 'DOTYK • ') +
+      'GAZ ' + (st.padThr === 'SPUSTKI' ? 'HOVER' : st.padThr)
     : touch.enabled ? 'DOTYK — dotknij drążka'
       : pad.connected
         ? (pad.active ? 'PAD • GAZ ' + st.padThr : 'PAD GOTOWY — rusz drążkiem')
         : 'KLAWIATURA';
-  fPad.className = 'mid ' + ((touch.enabled && touch.active) || (pad.connected && pad.active) ? 'accent' : '');
+  fPad.className = 'mid ' + ((touch.enabled && (touch.active || tilt.on)) || (pad.connected && pad.active) ? 'accent' : '');
 
   thrFill.style.height = (stick.thr * 100).toFixed(1) + '%';
   stickL.style.transform = `translate(${stick.yaw * 24}px, ${(0.5 - stick.thr) * 48}px)`;
@@ -1545,6 +1642,7 @@ function beginGame() {
   if (st.started) return;
   st.started = true;
   startPanel.classList.add('hidden');
+  updateRotateHint();
   try { initAudio(); if (ac && ac.state === 'suspended') ac.resume(); }
   catch (e) { ac = null; console.warn('audio off:', e); }   // brak audio nie może zabić lotu
   msg('GO', pad.connected ? 'lewy drążek = gaz' : 'W = gaz', 1.4);
@@ -1606,6 +1704,22 @@ tbtn('tb-cam', () => toggleCam());
 tbtn('tb-mode', () => toggleMode());
 tbtn('tb-nav', () => { if (activeMap.race) restartRace(); else cycleNav(1); });
 tbtn('tb-full', () => toggleFull());
+/* żyroskop: krótkie dotknięcie włącza/wyłącza, przytrzymanie zeruje punkt neutralny.
+   Przełączamy na pointerup, bo iOS pyta o zgodę na czujnik tylko z gestu użytkownika. */
+(function () {
+  const b = el('tb-gyro');
+  let timer = 0, held = false;
+  b.addEventListener('pointerdown', e => {
+    e.preventDefault(); e.stopPropagation(); held = false;
+    timer = setTimeout(() => { held = true; if (tilt.on) calibrateTilt(); }, 600);
+  });
+  b.addEventListener('pointerup', e => {
+    e.preventDefault(); e.stopPropagation(); clearTimeout(timer);
+    if (!held) setTilt(!tilt.on);
+  });
+  b.addEventListener('pointercancel', () => clearTimeout(timer));
+  b.addEventListener('click', e => e.preventDefault());
+})();
 
 const startHint = document.querySelector('#start .key-hint');
 const startHintHtml = startHint ? startHint.innerHTML : '';
@@ -1636,7 +1750,87 @@ window.addEventListener('touchstart', function firstTouch() {
   window.removeEventListener('touchstart', firstTouch);
   touch.supported = true;
   if (touchPref === null && !touch.enabled) setTouchUI(true);
+  fitView();
 }, { passive: true });
+
+/* ============================================================
+   ROZPOZNANIE EKRANU: TELEFON / TABLET / PULPIT
+   Klasa ekranu steruje wielkością drążków i OSD (data-device w CSS),
+   gęstością renderowania oraz pionowym polem widzenia kamery.
+   ============================================================ */
+const UI_MODES = ['AUTO', 'TELEFON', 'TABLET', 'PULPIT'];
+const UI_TO_DEVICE = { TELEFON: 'phone', TABLET: 'tablet', PULPIT: 'desktop' };
+let uiMode = 'AUTO';
+try { uiMode = localStorage.getItem('gradron.ui') || 'AUTO'; } catch (e) { }
+const qUi = /[?&]ui=(\w+)/.exec(location.search);
+if (qUi) uiMode = qUi[1].toUpperCase();
+if (UI_MODES.indexOf(uiMode) < 0) uiMode = 'AUTO';
+
+function detectDevice() {
+  if (UI_TO_DEVICE[uiMode]) return UI_TO_DEVICE[uiMode];
+  const short = Math.min(window.innerWidth, window.innerHeight);
+  const long = Math.max(window.innerWidth, window.innerHeight);
+  if (!touch.supported) return 'desktop';
+  if (short <= 500 || long <= 820) return 'phone';       // telefony w pionie i w poziomie
+  return 'tablet';                                        // duży ekran dotykowy
+}
+let device = '';
+function applyDevice() {
+  const d = detectDevice();
+  if (d === device) return;
+  device = d;
+  document.body.dataset.device = d;
+  // telefony mają gęste ekrany — pełne DPR zjada klatki, więc renderujemy oszczędniej
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,
+    d === 'phone' ? 1.35 : d === 'tablet' ? 1.6 : 1.75));
+}
+function cycleUiMode(dir) {
+  uiMode = UI_MODES[(UI_MODES.indexOf(uiMode) + (dir || 1) + UI_MODES.length) % UI_MODES.length];
+  try { localStorage.setItem('gradron.ui', uiMode); } catch (e) { }
+  device = '';                                            // wymuś ponowne przeliczenie
+  fitView();
+}
+
+/* Kamera: trzymamy stałe pole widzenia w poziomie (jak w goglach FPV), a pionowe
+   liczymy z proporcji ekranu — inaczej telefon w pionie pokazuje wąski tunel.
+   Wartości odniesienia to dotychczasowe 105° / 74° w pionie przy ekranie 16:9. */
+const HFOV_FPV = 133, HFOV_TPP = 107;
+function vFov(hfov, aspect) { return 2 * Math.atan(Math.tan(hfov * DEG / 2) / aspect) / DEG; }
+function fitView() {
+  const w = window.innerWidth, h = window.innerHeight;
+  const aspect = w / h;
+  camera.aspect = aspect;
+  FOV.fpv = clamp(vFov(HFOV_FPV, aspect), 88, 118);
+  FOV.tpp = clamp(vFov(HFOV_TPP, aspect), 62, 96);
+  camera.fov = st.camMode === 'TPP' ? FOV.tpp : FOV.fpv;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  applyDevice();
+  updateRotateHint();
+}
+
+/* podpowiedź "obróć telefon" — tylko na telefonie w pionie i poza lotem */
+const rotateEl = el('rotate');
+let rotateOff = false;
+try { rotateOff = localStorage.getItem('gradron.rotate') === 'off'; } catch (e) { }
+function updateRotateHint() {
+  if (!rotateEl) return;
+  const portrait = window.innerHeight > window.innerWidth;
+  const show = !rotateOff && device === 'phone' && portrait && (!st.started || st.paused);
+  rotateEl.classList.toggle('hidden', !show);
+}
+el('rot-ok').addEventListener('click', () => {
+  rotateOff = true;
+  try { localStorage.setItem('gradron.rotate', 'off'); } catch (e) { }
+  updateRotateHint();
+});
+
+fitView();
+/* zapamiętany żyroskop wracamy tylko tam, gdzie nie trzeba pytać o zgodę z gestu (Android);
+   na iOS użytkownik włącza go przyciskiem ŻYRO */
+if (touch.supported && localStorage.getItem('gradron.tilt') === '1' &&
+  !(window.DeviceOrientationEvent && typeof window.DeviceOrientationEvent.requestPermission === 'function'))
+  setTilt(true);
 
 /* ---------- przełączniki (używane i przez klawisze, i przez menu, i przez pada) ---------- */
 function toggleMode() { st.mode = st.mode === 'ACRO' ? 'ANGLE' : 'ACRO'; msg(st.mode, 'tryb lotu', 1.1); }
@@ -1686,8 +1880,15 @@ function cycleWind(d) {
   msg('', st.windSpeed ? 'wiatr ' + st.windSpeed + ' m/s' : 'wiatr wyłączony', 0.9);
 }
 function toggleFull() {
-  if (!document.fullscreenElement) { if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen(); }
-  else if (document.exitFullscreen) document.exitFullscreen();
+  if (!document.fullscreenElement) {
+    if (!document.documentElement.requestFullscreen) return;
+    const p = document.documentElement.requestFullscreen();
+    // na telefonie pełny ekran ma sens tylko w poziomie — jeśli przeglądarka pozwala, obracamy
+    if (p && p.then) p.then(() => {
+      if (device === 'phone' && screen.orientation && screen.orientation.lock)
+        screen.orientation.lock('landscape').catch(() => { });
+    }).catch(() => { });
+  } else if (document.exitFullscreen) document.exitFullscreen();
 }
 
 /* ============================================================
@@ -1719,6 +1920,18 @@ const MENU = [
     label: 'Drążki dotykowe (telefon)', val: () => touch.enabled ? 'ON' : 'OFF',
     act: () => setTouchUI(!touch.enabled, true), adj: () => setTouchUI(!touch.enabled, true)
   },
+  {
+    label: 'Układ ekranu',
+    val: () => uiMode === 'AUTO'
+      ? 'AUTO (' + (device === 'phone' ? 'telefon' : device === 'tablet' ? 'tablet' : 'pulpit') + ')'
+      : uiMode,
+    act: () => { cycleUiMode(1); paintMenu(); }, adj: d => { cycleUiMode(d); paintMenu(); }
+  },
+  {
+    label: 'Sterowanie przechyłem telefonu', val: () => tilt.on ? 'ON · ' + tilt.range + '°' : 'OFF',
+    act: () => setTilt(!tilt.on), adj: d => { if (tilt.on) cycleTiltRange(d); else setTilt(true); }
+  },
+  { label: 'Wyzeruj przechył (trzymaj telefon jak do lotu)', act: () => calibrateTilt() },
   {
     label: 'Prędkość wiatru',
     val: () => st.windSpeed ? st.windSpeed + ' m/s  (' + Math.round(st.windSpeed * 3.6) + ' km/h)' : 'OFF',
@@ -1757,6 +1970,7 @@ function paintMenu() {
 function openMenu() {
   if (!st.started || menuOpen) return;
   menuOpen = true; st.paused = true;
+  updateRotateHint();
   for (const k in keys) keys[k] = false;
   menuEl.classList.remove('hidden');
   paintMenu();
@@ -1764,6 +1978,7 @@ function openMenu() {
 function closeMenu(announce) {
   if (!menuOpen) return;
   menuOpen = false; st.paused = false;
+  updateRotateHint();
   menuEl.classList.add('hidden');
   if (announce) msg('LOT', 'ustawienia zamknięte', 1.1);
 }
@@ -1835,11 +2050,11 @@ window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; }
 window.addEventListener('gamepadconnected', () => { if (menuOpen) paintMenu(); });
 window.addEventListener('gamepaddisconnected', () => { if (menuOpen) paintMenu(); });
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+window.addEventListener('resize', fitView);
+window.addEventListener('orientationchange', () => setTimeout(fitView, 120));
+if (window.visualViewport) window.visualViewport.addEventListener('resize', fitView);
+if (screen.orientation && screen.orientation.addEventListener)
+  screen.orientation.addEventListener('change', () => setTimeout(fitView, 120));
 
 /* ?auto — pominięcie ekranu startowego (przydatne do testów i zrzutów) */
 /* wybór mapy: ?map=port|alpine|tor, inaczej ostatnio używana */
@@ -1857,7 +2072,8 @@ if (/[?&]auto/.test(location.search)) {
   window.__gd = {
     st, stick, gates, THREE, camera, colliders, inSolid, physics,
     renderer, scene, groundMap, concreteMap,
-    setMap, cycleMap, cycleNav, navTarget, updateSignal, get activeMap() { return activeMap; },
+    setMap, cycleMap, cycleNav, navTarget, updateSignal, touch, tilt, FOV,
+    get activeMap() { return activeMap; }, get device() { return device; },
     get builtMaps() { return builtMaps; }
   }; // hook do testów
   beginGame();
@@ -1871,7 +2087,10 @@ const propSpin = [0, 0, 0, 0];
 function frame(now) {
   requestAnimationFrame(frame);
   let dt = (now - last) / 1000; last = now;
-  if (dt > 0.1) dt = 0.1;
+  // rAF potrafi podać znacznik czasu sprzed startu pętli (długa inicjalizacja na telefonie) —
+  // ujemny albo ogromny krok policzyłby fizykę wstecz i wysadził prędkości w kosmos
+  if (!(dt > 0)) dt = 0;
+  else if (dt > 0.1) dt = 0.1;
 
   pollPad();                       // pad czytamy zawsze — także w menu i na ekranie startowym
   padGlobal(dt);

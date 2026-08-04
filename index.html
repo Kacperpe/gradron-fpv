@@ -9,7 +9,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0a0d12; }
   body { font-family: "Consolas", "SF Mono", ui-monospace, monospace; color: #d8f5e0; }
-  #view { display: block; width: 100vw; height: 100vh; }
+  #view { display: block; width: 100vw; height: 100vh; height: 100dvh; }
 
   /* ---------- OSD ---------- */
   #osd {
@@ -166,9 +166,14 @@
   .padrow { margin-top: 16px; padding: 8px 12px; border-radius: 6px; font-size: 12px;
     letter-spacing: 1px; background: rgba(0,0,0,.3); border: 1px dashed rgba(234,255,240,.18); }
 
-  /* ---------- sterowanie dotykowe (telefon / tablet) ---------- */
-  :root { --pad: clamp(108px, 30vw, 170px); }
-  @media (max-height: 460px) { :root { --pad: clamp(96px, 20vh, 132px); } }
+  /* ---------- sterowanie dotykowe (telefon / tablet) ----------
+     --pad = średnica drążka, --ui = skala napisów; jedno i drugie zależy
+     od rozpoznanej klasy ekranu (data-device ustawia game.js) */
+  :root { --pad: clamp(108px, 30vw, 170px); --ui: 1; }
+  body[data-device="phone"]   { --pad: clamp(100px, 27vmin, 150px); --ui: .95; }
+  body[data-device="tablet"]  { --pad: clamp(140px, 21vmin, 216px); --ui: 1.3; }
+  body[data-device="desktop"] { --pad: clamp(120px, 14vmin, 170px); --ui: 1.1; }
+  @media (max-height: 440px) { body[data-device="phone"] { --pad: clamp(88px, 23vh, 126px); } }
   #touch { position: fixed; inset: 0; z-index: 8; display: none; pointer-events: none;
     touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
   body.touch #touch { display: block; }
@@ -178,10 +183,12 @@
   body.touch #osd-br { right: 36px; }
   body.touch #osd-bc { bottom: calc(var(--pad) + 96px); }
   body.touch #thr-wrap { left: auto; right: 12px; top: 46%; height: 120px; }
-  body.touch #osd { font-size: 13px; }
-  body.touch .big { font-size: 22px; }
-  body.touch .mid { font-size: 14px; }
-  body.touch .lbl { font-size: 9px; letter-spacing: 1px; }
+  body.touch #osd { font-size: calc(13px * var(--ui)); }
+  body.touch .big { font-size: calc(22px * var(--ui)); }
+  body.touch .mid { font-size: calc(14px * var(--ui)); }
+  body.touch .lbl { font-size: calc(9px * var(--ui)); letter-spacing: 1px; }
+  body.touch #msg { font-size: calc(30px * var(--ui)); }
+  body.touch #msg small { font-size: calc(12px * var(--ui)); }
 
   .tpad { position: absolute; bottom: calc(14px + env(safe-area-inset-bottom, 0px));
     width: var(--pad); height: var(--pad); border-radius: 50%; pointer-events: auto;
@@ -205,10 +212,30 @@
   #touch-btns { position: absolute; left: 8px; right: 8px; top: calc(8px + env(safe-area-inset-top, 0px));
     display: flex; gap: 5px; flex-wrap: wrap; justify-content: center; pointer-events: none; }
   .tbtn { pointer-events: auto; }
-  .tbtn { min-width: 40px; padding: 8px 6px; border-radius: 8px; cursor: pointer;
+  .tbtn { min-width: calc(40px * var(--ui)); padding: calc(8px * var(--ui)) calc(7px * var(--ui));
+    border-radius: 8px; cursor: pointer;
     border: 1px solid rgba(126,247,192,.28); background: rgba(6,14,12,.55); color: #d8f5e0;
-    font: 700 9px/1 ui-monospace, monospace; letter-spacing: .5px; text-transform: uppercase;
+    font: 700 calc(9px * var(--ui))/1 ui-monospace, monospace; letter-spacing: .5px; text-transform: uppercase;
     touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+
+  /* prawy drążek w trybie żyroskopu tylko podpowiada — nadal działa po dotknięciu */
+  body.gyro #tpad-r { opacity: .5; }
+  body.gyro #tpad-r em::after { content: " · żyro"; }
+
+  /* podpowiedź o obróceniu telefonu */
+  #rotate { position: fixed; inset: 0; z-index: 12; display: flex; align-items: center;
+    justify-content: center; padding: 24px; text-align: center;
+    background: rgba(5,10,13,.93); backdrop-filter: blur(4px); }
+  #rotate.hidden { display: none; }
+  #rotate .rot-icon { font-size: 46px; color: #7ef7c0; animation: rot 2.2s ease-in-out infinite; }
+  @keyframes rot { 0%, 45% { transform: rotate(0); } 60%, 100% { transform: rotate(90deg); } }
+  #rotate strong { display: block; margin: 14px 0 8px; font: 800 19px/1.2 system-ui, sans-serif;
+    letter-spacing: 1px; color: #eafff0; }
+  #rotate p { max-width: 320px; margin: 0 auto; font: 400 13px/1.55 system-ui, sans-serif;
+    color: rgba(235,249,241,.72); }
+  #rot-ok { margin-top: 20px; padding: 12px 20px; border: 1px solid rgba(126,247,192,.45);
+    border-radius: 8px; background: rgba(126,247,192,.12); color: #7ef7c0; cursor: pointer;
+    font: 700 11px/1 ui-monospace, monospace; letter-spacing: 1.4px; text-transform: uppercase; }
   .tbtn.on, .tbtn:active { background: rgba(126,247,192,.26); border-color: rgba(126,247,192,.7); color: #eafff0; }
 
   kbd { display: inline-block; padding: 1px 6px; border: 1px solid rgba(234,255,240,.3);
@@ -276,10 +303,21 @@
     <button class="tbtn" id="tb-cam" type="button">FPV</button>
     <button class="tbtn" id="tb-mode" type="button">Acro</button>
     <button class="tbtn" id="tb-nav" type="button">Cel</button>
+    <button class="tbtn" id="tb-gyro" type="button">Żyro</button>
     <button class="tbtn" id="tb-full" type="button">⛶</button>
   </div>
   <div class="tpad" id="tpad-l"><div class="knob"></div><em>gaz / yaw</em></div>
   <div class="tpad" id="tpad-r"><div class="knob"></div><em>pitch / roll</em></div>
+</div>
+
+<div id="rotate" class="hidden">
+  <div class="rot-card">
+    <div class="rot-icon">⟳</div>
+    <strong>Obróć telefon poziomo</strong>
+    <p>W poziomie widać dużo więcej trasy, a drążki wypadają wygodniej pod kciukami.
+      Dolna belka przeglądarki znika po włączeniu pełnego ekranu (przycisk ⛶).</p>
+    <button id="rot-ok" type="button">Gram w pionie</button>
+  </div>
 </div>
 
 <div id="vignette"></div>
@@ -338,11 +376,22 @@
       <div class="row"><span>Pitch (nos)</span><b>prawy drążek ↑↓</b></div>
       <div class="row"><span>Roll (przechył)</span><b>prawy drążek ←→</b></div>
       <div class="row"><span>Menu / reset / kamera</span><b>przyciski na górze</b></div>
+      <div class="row"><span>Sterowanie przechyłem telefonu</span><b>przycisk ŻYRO</b></div>
+      <div class="row"><span>Wyzerowanie przechyłu</span><b>przytrzymaj ŻYRO</b></div>
       <div class="row"><span>Włącz lub wyłącz drążki</span><b>menu → Drążki dotykowe</b></div>
     </div>
     <p>Drążki włączają się same na ekranie dotykowym. Oba są sprężynowane — puszczony lewy drążek
       wraca do <b>gazu zawisu</b>, więc dron nie spada. Obróć telefon poziomo i włącz
-      <b>Pełny</b> ekran, żeby mieć więcej widoku.</p>
+      <b>⛶ pełny ekran</b>, żeby mieć więcej widoku.</p>
+    <p><b>ŻYRO</b> zamienia telefon w kierownicę: przechylasz go na bok — dron robi roll,
+      pochylasz do siebie — zadziera nos. Punkt neutralny bierze się z pozycji telefonu w chwili
+      włączenia, więc możesz grać jak Ci wygodnie; przytrzymanie przycisku zeruje go ponownie.
+      Gaz i obrót zostają na lewym drążku, a dotknięcie prawego chwilowo przejmuje ster.
+      Czułość (18° / 28° / 40°) ustawisz w menu.</p>
+    <p>Gra rozpoznaje wielkość ekranu i sama dobiera układ: <b>telefon</b> dostaje zwarty OSD
+      i mniejsze drążki, <b>tablet</b> większe drążki i napisy, a pole widzenia kamery liczy się
+      z proporcji ekranu, żeby w pionie nie oglądać wąskiego tunelu. Wybór można wymusić
+      w menu → <b>Układ ekranu</b>.</p>
 
     <h2>Pad Xbox 360 / Xbox One / dowolny</h2>
     <div class="grid">
