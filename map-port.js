@@ -40,10 +40,19 @@ var PortMap = (function () {
     const aniso = renderer ? renderer.capabilities.getMaxAnisotropy() : 1;
 
     /* ---------- materiały ---------- */
+    const detailLoader = new THREE.TextureLoader();
+    const concreteDetail = detailLoader.load('assets/textures/weathered-concrete.jpg');
+    concreteDetail.wrapS = concreteDetail.wrapT = THREE.RepeatWrapping;
+    concreteDetail.repeat.set(2, 2); concreteDetail.anisotropy = aniso;
+    concreteDetail.encoding = THREE.sRGBEncoding;
+    const asphaltDetail = detailLoader.load('assets/textures/industrial-ground.jpg');
+    asphaltDetail.wrapS = asphaltDetail.wrapT = THREE.RepeatWrapping;
+    asphaltDetail.repeat.set(3, 3); asphaltDetail.anisotropy = aniso;
+    asphaltDetail.encoding = THREE.sRGBEncoding;
     const M = {
-      concrete: new THREE.MeshStandardMaterial({ color: 0x9a9c98, roughness: 0.94 }),
-      concreteDark: new THREE.MeshStandardMaterial({ color: 0x6d716f, roughness: 0.95 }),
-      asphalt: new THREE.MeshStandardMaterial({ color: 0x3b3f42, roughness: 0.98 }),
+      concrete: new THREE.MeshStandardMaterial({ map: concreteDetail, color: 0xaeb0aa, roughness: 0.94 }),
+      concreteDark: new THREE.MeshStandardMaterial({ map: concreteDetail, color: 0x747a77, roughness: 0.95 }),
+      asphalt: new THREE.MeshStandardMaterial({ map: asphaltDetail, color: 0x4b504d, roughness: 0.98 }),
       steel: new THREE.MeshStandardMaterial({ color: 0x8d949b, roughness: 0.55, metalness: 0.65 }),
       steelDark: new THREE.MeshStandardMaterial({ color: 0x4a5158, roughness: 0.6, metalness: 0.5 }),
       paintRed: new THREE.MeshStandardMaterial({ color: 0xc7452f, roughness: 0.7 }),

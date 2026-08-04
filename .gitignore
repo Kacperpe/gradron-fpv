@@ -8,6 +8,9 @@
 .codex
 context
 
+# pracownia map (źródła robocze; gotowe mapy leżą w map-*.js w katalogu głównym)
+GraDron-mapy
+
 # śmieci systemowe
 Thumbs.db
 desktop.ini

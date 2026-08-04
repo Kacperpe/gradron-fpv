@@ -2,7 +2,8 @@
 <html lang="pl">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
 <title>GraDron — symulator FPV</title>
 <style>
   * { box-sizing: border-box; }
@@ -165,6 +166,51 @@
   .padrow { margin-top: 16px; padding: 8px 12px; border-radius: 6px; font-size: 12px;
     letter-spacing: 1px; background: rgba(0,0,0,.3); border: 1px dashed rgba(234,255,240,.18); }
 
+  /* ---------- sterowanie dotykowe (telefon / tablet) ---------- */
+  :root { --pad: clamp(108px, 30vw, 170px); }
+  @media (max-height: 460px) { :root { --pad: clamp(96px, 20vh, 132px); } }
+  #touch { position: fixed; inset: 0; z-index: 8; display: none; pointer-events: none;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+  body.touch #touch { display: block; }
+  body.touch #stick-l, body.touch #stick-r { display: none; }
+  body.touch #osd-tl, body.touch #osd-tr { top: 56px; }
+  body.touch #osd-bl, body.touch #osd-br { bottom: calc(var(--pad) + 26px); max-width: 46vw; }
+  body.touch #osd-br { right: 36px; }
+  body.touch #osd-bc { bottom: calc(var(--pad) + 96px); }
+  body.touch #thr-wrap { left: auto; right: 12px; top: 46%; height: 120px; }
+  body.touch #osd { font-size: 13px; }
+  body.touch .big { font-size: 22px; }
+  body.touch .mid { font-size: 14px; }
+  body.touch .lbl { font-size: 9px; letter-spacing: 1px; }
+
+  .tpad { position: absolute; bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    width: var(--pad); height: var(--pad); border-radius: 50%; pointer-events: auto;
+    touch-action: none;
+    border: 1px solid rgba(126,247,192,.24);
+    background: radial-gradient(circle at 50% 50%, rgba(126,247,192,.07), rgba(0,0,0,.3) 72%); }
+  #tpad-l { left: calc(14px + env(safe-area-inset-left, 0px)); }
+  #tpad-r { right: calc(14px + env(safe-area-inset-right, 0px)); }
+  .tpad.on { border-color: rgba(126,247,192,.62); background:
+    radial-gradient(circle at 50% 50%, rgba(126,247,192,.13), rgba(0,0,0,.34) 72%); }
+  .tpad::before, .tpad::after { content: ""; position: absolute; left: 22%; right: 22%; top: 50%;
+    border-top: 1px dashed rgba(234,255,240,.16); }
+  .tpad::after { transform: rotate(90deg); }
+  .tpad .knob { position: absolute; left: 50%; top: 50%; width: 38%; height: 38%;
+    margin: -19% 0 0 -19%; border-radius: 50%; background: rgba(126,247,192,.26);
+    border: 1px solid rgba(126,247,192,.8); box-shadow: 0 0 16px rgba(47,208,138,.45); }
+  .tpad em { position: absolute; left: 0; right: 0; bottom: 7px; text-align: center;
+    font: 600 8px/1 ui-monospace, monospace; letter-spacing: 1.2px; text-transform: uppercase;
+    color: rgba(234,255,240,.45); font-style: normal; }
+
+  #touch-btns { position: absolute; left: 8px; right: 8px; top: calc(8px + env(safe-area-inset-top, 0px));
+    display: flex; gap: 5px; flex-wrap: wrap; justify-content: center; pointer-events: none; }
+  .tbtn { pointer-events: auto; }
+  .tbtn { min-width: 40px; padding: 8px 6px; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgba(126,247,192,.28); background: rgba(6,14,12,.55); color: #d8f5e0;
+    font: 700 9px/1 ui-monospace, monospace; letter-spacing: .5px; text-transform: uppercase;
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  .tbtn.on, .tbtn:active { background: rgba(126,247,192,.26); border-color: rgba(126,247,192,.7); color: #eafff0; }
+
   kbd { display: inline-block; padding: 1px 6px; border: 1px solid rgba(234,255,240,.3);
     border-bottom-width: 2px; border-radius: 4px; font-size: 12px; background: rgba(0,0,0,.3); }
   @media (max-width: 680px) {
@@ -223,6 +269,19 @@
   <div id="msg"></div>
 </div>
 
+<div id="touch">
+  <div id="touch-btns">
+    <button class="tbtn" id="tb-menu" type="button">Menu</button>
+    <button class="tbtn" id="tb-resp" type="button">Reset</button>
+    <button class="tbtn" id="tb-cam" type="button">FPV</button>
+    <button class="tbtn" id="tb-mode" type="button">Acro</button>
+    <button class="tbtn" id="tb-nav" type="button">Cel</button>
+    <button class="tbtn" id="tb-full" type="button">⛶</button>
+  </div>
+  <div class="tpad" id="tpad-l"><div class="knob"></div><em>gaz / yaw</em></div>
+  <div class="tpad" id="tpad-r"><div class="knob"></div><em>pitch / roll</em></div>
+</div>
+
 <div id="vignette"></div>
 <div id="scan"></div>
 <div id="static"></div>
@@ -271,6 +330,19 @@
       Mapę zmienia się klawiszem <kbd>K</kbd> lub w menu; wybór jest pamiętany.
       Na mapach misyjnych <kbd>G</kbd> przełącza cel nawigacji (słup światła + dystans w OSD),
       a <kbd>R</kbd> stawia drona nad wybranym celem. Uwaga: <b>kontakt z wodą kończy lot</b>.</p>
+
+    <h2>Telefon / tablet — dotyk</h2>
+    <div class="grid">
+      <div class="row"><span>Gaz góra / dół</span><b>lewy drążek ↑↓</b></div>
+      <div class="row"><span>Yaw (obrót)</span><b>lewy drążek ←→</b></div>
+      <div class="row"><span>Pitch (nos)</span><b>prawy drążek ↑↓</b></div>
+      <div class="row"><span>Roll (przechył)</span><b>prawy drążek ←→</b></div>
+      <div class="row"><span>Menu / reset / kamera</span><b>przyciski na górze</b></div>
+      <div class="row"><span>Włącz lub wyłącz drążki</span><b>menu → Drążki dotykowe</b></div>
+    </div>
+    <p>Drążki włączają się same na ekranie dotykowym. Oba są sprężynowane — puszczony lewy drążek
+      wraca do <b>gazu zawisu</b>, więc dron nie spada. Obróć telefon poziomo i włącz
+      <b>Pełny</b> ekran, żeby mieć więcej widoku.</p>
 
     <h2>Pad Xbox 360 / Xbox One / dowolny</h2>
     <div class="grid">

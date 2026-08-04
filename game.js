@@ -471,13 +471,24 @@ const TOR_COLLIDERS = colliders.slice();
 const FLAT_SURF = { y: 0, water: false };
 
 const MAP_DEFS = [
-  { key: 'tor', label: 'Tor wyścigowy (12 bramek)', race: true, fog: [140, 620], bounds: 700, ceiling: 260 },
   {
-    key: 'port', label: 'Port Mewi (misyjna)', race: false, fog: [200, 1500], bounds: 900, ceiling: 320,
+    key: 'tor', label: 'Tor wyścigowy (12 bramek)', short: 'Strefa 12',
+    type: 'Wyścig · techniczna', desc: '12 bramek, ciasne linie i industrialne przeszkody',
+    race: true, fog: [140, 620], bounds: 700, ceiling: 260, signalRange: 520,
+    skyTop: 0x2f6ea8, skyBot: 0xbcd6e4, fogColor: 0xa8c4d6, exposure: 0.92, glow: '#7ef7c0'
+  },
+  {
+    key: 'port', label: 'Port Mewi (misyjna)', short: 'Port Mewi',
+    type: 'Freestyle · morska', desc: 'Suwnice, kontenery, statki, wiatraki i otwarta woda',
+    race: false, fog: [190, 1420], bounds: 900, ceiling: 320, signalRange: 760,
+    skyTop: 0x315a76, skyBot: 0xb2c7c9, fogColor: 0x9fb5ba, exposure: 0.88, glow: '#57bde8',
     build: () => (typeof PortMap === 'undefined' ? null : PortMap.create(THREE, scene, renderer))
   },
   {
-    key: 'alpine', label: 'Dolina Wilcza (misyjna)', race: false, fog: [240, 1900], bounds: 820, ceiling: 620,
+    key: 'alpine', label: 'Dolina Wilcza (misyjna)', short: 'Dolina Wilcza',
+    type: 'Eksploracja · górska', desc: 'Zapora, las, wyciąg i loty wysoko nad doliną',
+    race: false, fog: [220, 1780], bounds: 820, ceiling: 620, signalRange: 900,
+    skyTop: 0x315178, skyBot: 0xd1d9d4, fogColor: 0xbac6c2, exposure: 0.98, glow: '#ffd36a',
     build: () => (typeof AlpineMap === 'undefined' ? null : AlpineMap.create(THREE, scene, renderer))
   }
 ];
@@ -485,7 +496,7 @@ const builtMaps = {};                    // cache: mapy budujemy raz, potem tylk
 let activeMap = {
   key: 'tor', name: 'TOR WYŚCIGOWY', race: true, fog: [140, 620],
   spawn: { pos: START.clone() }, pois: [], surfaceAt: null, update: null,
-  bounds: 700, ceiling: 260
+  bounds: 700, ceiling: 260, signalRange: 520
 };
 
 /* słup światła nad wybranym celem nawigacji (mapy misyjne) */
@@ -529,6 +540,7 @@ function resetOnMap() {
   st.quat.identity();
   if (activeMap.race) faceGate(0); else faceNav();
   st.onGround = true; st.crashed = 0; st.camSnap = true;
+  st.signalQuality = st.signalRaw = 1; st.signalBlocked = 0; st.signalDistance = 0;
   st.timing = false; st.time = 0; st.nextGate = 0; st.lastGate = -1; st.lap = 0;
   stick.thr = 0;
   if (activeMap.race) { for (const g of gates) g.prevZ = null; updateBeacon(); }
@@ -556,7 +568,7 @@ function setMap(key, quiet) {
     activeMap = {
       key: 'tor', name: 'TOR WYŚCIGOWY', race: true, fog: def.fog,
       spawn: { pos: START.clone() }, pois: [], surfaceAt: null, update: null,
-      bounds: def.bounds, ceiling: def.ceiling
+      bounds: def.bounds, ceiling: def.ceiling, signalRange: def.signalRange
     };
   } else {
     const m = builtMaps[def.key];
@@ -564,15 +576,21 @@ function setMap(key, quiet) {
     activeMap = {
       key: def.key, name: m.name, race: false, fog: def.fog,
       spawn: m.spawn, pois: m.pois || [], surfaceAt: m.surfaceAt || null,
-      zones: m.zones, landmarks: m.landmarks, update: m.update
+      zones: m.zones, landmarks: m.landmarks, update: m.update,
+      bounds: def.bounds, ceiling: def.ceiling, signalRange: def.signalRange
     };
   }
 
+  SKY_TOP.setHex(def.skyTop);
+  SKY_BOT.setHex(def.skyBot);
+  scene.fog.color.setHex(def.fogColor);
   scene.fog.near = activeMap.fog[0];
   scene.fog.far = activeMap.fog[1];
+  renderer.toneMappingExposure = def.exposure;
   navIdx = 0;
   try { localStorage.setItem('gradron.map', activeMap.key); } catch (e) { }
   resetOnMap();
+  if (typeof paintMapCards === 'function') paintMapCards();
   if (!quiet) msg(activeMap.name, activeMap.race ? 'wyścig przez bramki' : 'lot swobodny — cel: G / menu', 2);
 }
 function cycleMap(d) {
@@ -677,7 +695,12 @@ const st = {
   started: false,
   padThr: localStorage.getItem('gradron.padthr') || 'HOVER',   // HOVER | LINIOWY | SPUSTKI
   osd: true,
-  vtx: true
+  vtx: true,
+  signalQuality: 1,
+  signalRaw: 1,
+  signalBlocked: 0,
+  signalDistance: 0,
+  signalClock: 0
 };
 function faceGate(i) {
   const g = gates[((i % gates.length) + gates.length) % gates.length];
@@ -817,7 +840,29 @@ function padThrottle() {
   return clamp01(v >= 0 ? HOVER_T + v * (1 - HOVER_T) : HOVER_T * (1 + v));   // HOVER: środek = zawis
 }
 
+/* ---------- dotyk: dwa wirtualne drążki (telefon / tablet) ----------
+   Lewy = gaz + yaw, prawy = pitch + roll. Oba są sprężynowane jak w padzie,
+   więc puszczony lewy drążek wraca do gazu zawisu i dron nie spada. */
+const touch = {
+  supported: false, enabled: false, active: false,
+  l: { id: null, x: 0, y: 0 },
+  r: { id: null, x: 0, y: 0 }
+};
+
+function touchThrottle() {
+  const v = touch.l.y;                                   // -1 (dół) .. 1 (góra)
+  if (st.padThr === 'LINIOWY') return clamp01((v + 1) / 2);
+  return clamp01(v >= 0 ? HOVER_T + v * (1 - HOVER_T) : HOVER_T * (1 + v));
+}
+
 function readInput(dt) {
+  if (touch.enabled && touch.active) {
+    stick.thr = touchThrottle();
+    stick.yaw = toward(stick.yaw, touch.l.x, 24, 24, dt);
+    stick.roll = toward(stick.roll, touch.r.x, 24, 24, dt);
+    stick.pitch = toward(stick.pitch, touch.r.y, 24, 24, dt);
+    return;
+  }
   if (pad.connected && pad.active) {
     stick.thr = padThrottle();
     stick.yaw = toward(stick.yaw, pad.ax[0], 24, 24, dt);
@@ -1313,10 +1358,77 @@ const el = id => document.getElementById(id);
 const osd = el('osd'), msgEl = el('msg');
 const fTime = el('f-time'), fBest = el('f-best'), fGate = el('f-gate'), fMode = el('f-mode'),
   fDist = el('f-dist'), fSpd = el('f-spd'), fAlt = el('f-alt'), fBatt = el('f-batt'),
-  fCrash = el('f-crash'), fPad = el('f-pad'), fWind = el('f-wind'), fGateLbl = el('f-gate-lbl'),
+  fCrash = el('f-crash'), fPad = el('f-pad'), fWind = el('f-wind'), fSignal = el('f-signal'),
+  fGateLbl = el('f-gate-lbl'),
   thrFill = el('thr-fill'), horizon = el('horizon'),
   stickL = el('stick-l').firstElementChild, stickR = el('stick-r').firstElementChild,
-  staticEl = el('static');
+  staticEl = el('static'), signalNoise = el('signal-noise'), signalTear = el('signal-tear'),
+  signalBlackout = el('signal-blackout');
+
+/* Łącze radiowe jest liczone od miejsca startu pilota do drona.
+   Odległość osłabia sygnał płynnie, a bryły pomiędzy nadajnikiem i dronem
+   symulują tłumienie przez beton, kontenery, skały i drzewa. */
+const _sigA = new V3(), _sigB = new V3();
+function segmentHitsBox(a, b, box) {
+  let lo = 0, hi = 1;
+  for (const axis of ['x', 'y', 'z']) {
+    const d = b[axis] - a[axis];
+    if (Math.abs(d) < 1e-7) {
+      if (a[axis] < box.min[axis] || a[axis] > box.max[axis]) return false;
+    } else {
+      let t0 = (box.min[axis] - a[axis]) / d, t1 = (box.max[axis] - a[axis]) / d;
+      if (t0 > t1) { const t = t0; t0 = t1; t1 = t; }
+      lo = Math.max(lo, t0); hi = Math.min(hi, t1);
+      if (lo > hi) return false;
+    }
+  }
+  return hi > 0.025 && lo < 0.975;
+}
+function updateSignal(dt) {
+  st.signalClock += dt;
+  const pilot = activeMap.spawn && activeMap.spawn.pos ? activeMap.spawn.pos : START;
+  _sigA.copy(pilot).add(new V3(0, 2.2, 0));
+  _sigB.copy(st.pos);
+  const distance = _sigA.distanceTo(_sigB);
+  let blockers = 0;
+  if (st.signalClock >= 0.09) {
+    st.signalClock = 0;
+    for (let i = 0; i < colliders.length && blockers < 4; i++) {
+      if (segmentHitsBox(_sigA, _sigB, colliders[i])) blockers++;
+    }
+    const range = activeMap.signalRange || 650;
+    const t = clamp((distance - range * 0.28) / (range * 0.72), 0, 1);
+    const distanceLink = 1 - t * t * (3 - 2 * t);
+    const altitudeHelp = clamp((st.pos.y - _sigA.y) / 130, 0, 0.1);
+    const multipath = (Math.sin(st.simTime * 4.1 + st.pos.x * 0.037 + st.pos.z * 0.021) + 1) * 0.035;
+    let raw = clamp((distanceLink + altitudeHelp - multipath * (1 - distanceLink)) * Math.pow(0.61, blockers), 0.015, 1);
+    if (distance < 45) raw = Math.max(raw, 0.94);
+    st.signalRaw = raw;
+    st.signalBlocked = blockers;
+    st.signalDistance = distance;
+  }
+  const response = 1 - Math.exp(-Math.max(0.001, dt) * (st.signalRaw < st.signalQuality ? 7.5 : 2.2));
+  st.signalQuality += (st.signalRaw - st.signalQuality) * response;
+
+  const active = st.vtx && st.camMode === 'FPV';
+  const loss = active ? clamp(1 - st.signalQuality, 0, 1) : 0;
+  const pulse = 0.5 + 0.5 * Math.sin(st.simTime * 23 + st.pos.x * 0.11);
+  const noise = loss < 0.16 ? 0 : clamp((loss - 0.12) * 0.78 + pulse * loss * 0.22, 0, 0.82);
+  signalNoise.style.opacity = noise.toFixed(3);
+  signalNoise.style.backgroundPosition = ((st.simTime * 83) % 100).toFixed(0) + 'px ' +
+    ((st.simTime * 137) % 100).toFixed(0) + 'px';
+  const tear = loss > 0.42 ? clamp((loss - 0.38) * (0.55 + pulse), 0, 0.92) : 0;
+  signalTear.style.opacity = tear.toFixed(3);
+  signalTear.style.top = (18 + ((st.simTime * 91) % 64)).toFixed(0) + '%';
+  signalTear.style.transform = 'translateX(' + ((pulse - 0.5) * loss * 42).toFixed(0) + 'px)';
+  const dropoutWave = Math.sin(st.simTime * 31.7 + st.pos.z * 0.08) * Math.sin(st.simTime * 7.3);
+  const blackout = loss > 0.72 && dropoutWave > (1.72 - loss * 1.4)
+    ? clamp((loss - 0.67) * 2.8, 0, 0.96) : 0;
+  signalBlackout.style.opacity = blackout.toFixed(3);
+  canvas.style.filter = active && loss > 0.18
+    ? `saturate(${(1 - loss * 0.58).toFixed(2)}) contrast(${(1 + loss * 0.3).toFixed(2)}) brightness(${(1 - loss * 0.18).toFixed(2)})`
+    : '';
+}
 
 let msgTimer = 0;
 function msg(big, small, dur) {
@@ -1340,6 +1452,12 @@ function updateOSD(dt) {
   if (fGateLbl) fGateLbl.textContent = activeMap.race ? 'bramka' : 'cel nawigacji';
   fMode.textContent = st.mode;
   fMode.className = 'mid ' + (st.mode === 'ACRO' ? 'accent' : 'warn');
+  if (touch.enabled) {
+    const bMode = el('tb-mode'), bNav = el('tb-nav'), bCam = el('tb-cam');
+    if (bMode) bMode.textContent = st.mode;
+    if (bNav) bNav.textContent = activeMap.race ? 'restart' : 'cel';
+    if (bCam) bCam.textContent = st.camMode === 'FPV' ? 'FPV' : '3os';
+  }
 
   if (activeMap.race) {
     fGate.textContent = (st.nextGate + 1) + '/' + gates.length;
@@ -1368,10 +1486,20 @@ function updateOSD(dt) {
       : 'WIATR ' + st.wind.length().toFixed(1) + ' m/s  ' + arrow;
     fWind.className = 'mid ' + (st.windSpeed >= 8 ? 'warn' : '');
   }
-  fPad.textContent = pad.connected
-    ? (pad.active ? 'PAD • GAZ ' + st.padThr : 'PAD GOTOWY — rusz drążkiem')
-    : 'KLAWIATURA';
-  fPad.className = 'mid ' + (pad.connected && pad.active ? 'accent' : '');
+  if (fSignal) {
+    const lq = Math.round(st.signalQuality * 100);
+    const rssi = Math.round(-43 - (1 - st.signalQuality) * 67);
+    fSignal.textContent = 'LQ ' + lq + '%  ·  RSSI ' + rssi +
+      (st.signalBlocked ? '  ·  LOS×' + st.signalBlocked : '');
+    fSignal.className = 'mid ' + (lq < 25 ? 'bad' : lq < 55 ? 'warn' : '');
+  }
+  fPad.textContent = touch.enabled && touch.active
+    ? 'DOTYK • GAZ ' + (st.padThr === 'SPUSTKI' ? 'HOVER' : st.padThr)
+    : touch.enabled ? 'DOTYK — dotknij drążka'
+      : pad.connected
+        ? (pad.active ? 'PAD • GAZ ' + st.padThr : 'PAD GOTOWY — rusz drążkiem')
+        : 'KLAWIATURA';
+  fPad.className = 'mid ' + ((touch.enabled && touch.active) || (pad.connected && pad.active) ? 'accent' : '');
 
   thrFill.style.height = (stick.thr * 100).toFixed(1) + '%';
   stickL.style.transform = `translate(${stick.yaw * 24}px, ${(0.5 - stick.thr) * 48}px)`;
@@ -1386,6 +1514,33 @@ function updateOSD(dt) {
    ZDARZENIA / WEJŚCIE
    ============================================================ */
 const startPanel = el('start');
+const startMapCards = el('start-map-cards'), menuMapCards = el('menu-map-cards');
+function makeMapCards(host) {
+  if (!host) return;
+  host.innerHTML = '';
+  for (const def of MAP_DEFS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'map-card' + (def.key === activeMap.key ? ' active' : '');
+    b.style.setProperty('--map-glow', def.glow);
+    b.innerHTML = '<small></small><strong></strong><span></span>';
+    b.children[0].textContent = def.type;
+    b.children[1].textContent = def.short;
+    b.children[2].textContent = def.desc;
+    b.addEventListener('mousedown', e => e.stopPropagation());
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      setMap(def.key);
+      paintMapCards();
+      if (menuOpen) paintMenu();
+    });
+    host.appendChild(b);
+  }
+}
+function paintMapCards() {
+  makeMapCards(startMapCards);
+  makeMapCards(menuMapCards);
+}
 function beginGame() {
   if (st.started) return;
   st.started = true;
@@ -1394,8 +1549,94 @@ function beginGame() {
   catch (e) { ac = null; console.warn('audio off:', e); }   // brak audio nie może zabić lotu
   msg('GO', pad.connected ? 'lewy drążek = gaz' : 'W = gaz', 1.4);
 }
-startPanel.addEventListener('click', beginGame);
-window.addEventListener('mousedown', () => { if (!st.started) beginGame(); });
+el('start-play').addEventListener('click', beginGame);
+paintMapCards();
+
+/* ---------- wirtualne drążki: obsługa dotyku ---------- */
+function bindTouchPad(elm, side) {
+  const knob = elm.firstElementChild;
+  const s = touch[side];
+  let cx = 0, cy = 0, rad = 1;
+
+  function measure() {
+    const r = elm.getBoundingClientRect();
+    cx = r.left + r.width / 2; cy = r.top + r.height / 2;
+    rad = r.width * 0.42;
+  }
+  function apply(e) {
+    let dx = (e.clientX - cx) / rad, dy = (e.clientY - cy) / rad;
+    const len = Math.hypot(dx, dy);
+    if (len > 1) { dx /= len; dy /= len; }
+    s.x = dx; s.y = -dy;                       // ekran ma Y w dół, drążek w górę
+    knob.style.transform = `translate(${(dx * rad).toFixed(1)}px, ${(dy * rad).toFixed(1)}px)`;
+  }
+  function release() {
+    s.id = null; s.x = 0; s.y = 0;
+    knob.style.transform = '';
+    elm.classList.remove('on');
+  }
+
+  elm.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (s.id !== null) return;
+    s.id = e.pointerId;
+    elm.setPointerCapture(e.pointerId);
+    elm.classList.add('on');
+    touch.active = true;
+    if (!st.started) beginGame();
+    measure(); apply(e);
+  });
+  elm.addEventListener('pointermove', e => { if (s.id === e.pointerId) { e.preventDefault(); apply(e); } });
+  for (const ev of ['pointerup', 'pointercancel'])
+    elm.addEventListener(ev, e => { if (s.id === e.pointerId) release(); });
+  elm.addEventListener('contextmenu', e => e.preventDefault());
+}
+bindTouchPad(el('tpad-l'), 'l');
+bindTouchPad(el('tpad-r'), 'r');
+
+function tbtn(id, fn) {
+  const b = el(id);
+  b.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); fn(); });
+  b.addEventListener('click', e => e.preventDefault());
+  return b;
+}
+tbtn('tb-menu', () => { if (!st.started) beginGame(); else toggleMenu(); });
+tbtn('tb-resp', () => respawnPressed());
+tbtn('tb-cam', () => toggleCam());
+tbtn('tb-mode', () => toggleMode());
+tbtn('tb-nav', () => { if (activeMap.race) restartRace(); else cycleNav(1); });
+tbtn('tb-full', () => toggleFull());
+
+const startHint = document.querySelector('#start .key-hint');
+const startHintHtml = startHint ? startHint.innerHTML : '';
+function setTouchUI(on, remember) {
+  touch.enabled = !!on;
+  document.body.classList.toggle('touch', touch.enabled);
+  if (startHint) {
+    startHint.innerHTML = touch.enabled
+      ? 'Dotknij <b>Uruchom lot</b> — drążki pojawią się na dole ekranu'
+      : startHintHtml;
+  }
+  if (!touch.enabled) {
+    touch.active = false;
+    touch.l.id = touch.r.id = null;
+    touch.l.x = touch.l.y = touch.r.x = touch.r.y = 0;
+  }
+  if (remember) { try { localStorage.setItem('gradron.touch', touch.enabled ? '1' : '0'); } catch (e) { } }
+}
+touch.supported = ('ontouchstart' in window) || navigator.maxTouchPoints > 0 ||
+  (window.matchMedia && matchMedia('(pointer: coarse)').matches);
+let touchPref = null;
+try { touchPref = localStorage.getItem('gradron.touch'); } catch (e) { }
+setTouchUI(touchPref !== null ? touchPref === '1' : touch.supported);
+
+/* pierwszy dotyk na urządzeniu bez wykrytego dotyku (np. hybryda) włącza drążki,
+   o ile użytkownik sam ich wcześniej nie wyłączył */
+window.addEventListener('touchstart', function firstTouch() {
+  window.removeEventListener('touchstart', firstTouch);
+  touch.supported = true;
+  if (touchPref === null && !touch.enabled) setTouchUI(true);
+}, { passive: true });
 
 /* ---------- przełączniki (używane i przez klawisze, i przez menu, i przez pada) ---------- */
 function toggleMode() { st.mode = st.mode === 'ACRO' ? 'ANGLE' : 'ACRO'; msg(st.mode, 'tryb lotu', 1.1); }
@@ -1419,6 +1660,13 @@ function toggleVtx() {
   st.vtx = !st.vtx;
   el('vignette').classList.toggle('off', !st.vtx);
   el('scan').classList.toggle('off', !st.vtx);
+  signalNoise.classList.toggle('off', !st.vtx);
+  signalTear.classList.toggle('off', !st.vtx);
+  signalBlackout.classList.toggle('off', !st.vtx);
+  if (!st.vtx) {
+    signalNoise.style.opacity = signalTear.style.opacity = signalBlackout.style.opacity = 0;
+    canvas.style.filter = '';
+  }
 }
 function cyclePadThr() {
   const m = ['HOVER', 'LINIOWY', 'SPUSTKI'];
@@ -1467,6 +1715,10 @@ const MENU = [
   { label: 'Kąt kamery FPV', val: () => Math.round(st.camTilt / DEG) + '°', act: () => tiltCam(5), adj: d => tiltCam(d * 5) },
   { label: 'Dystans kamery 3. osoby', val: () => st.camDist.toFixed(1) + ' m', act: () => distCam(1), adj: d => distCam(d) },
   { label: 'Gaz na padzie', val: () => st.padThr, act: cyclePadThr, adj: () => cyclePadThr() },
+  {
+    label: 'Drążki dotykowe (telefon)', val: () => touch.enabled ? 'ON' : 'OFF',
+    act: () => setTouchUI(!touch.enabled, true), adj: () => setTouchUI(!touch.enabled, true)
+  },
   {
     label: 'Prędkość wiatru',
     val: () => st.windSpeed ? st.windSpeed + ' m/s  (' + Math.round(st.windSpeed * 3.6) + ' km/h)' : 'OFF',
@@ -1605,7 +1857,7 @@ if (/[?&]auto/.test(location.search)) {
   window.__gd = {
     st, stick, gates, THREE, camera, colliders, inSolid, physics,
     renderer, scene, groundMap, concreteMap,
-    setMap, cycleMap, cycleNav, navTarget, get activeMap() { return activeMap; },
+    setMap, cycleMap, cycleNav, navTarget, updateSignal, get activeMap() { return activeMap; },
     get builtMaps() { return builtMaps; }
   }; // hook do testów
   beginGame();
@@ -1658,6 +1910,7 @@ function frame(now) {
   drone.position.copy(st.pos);
   drone.quaternion.copy(st.quat);
   updateCamera(dt);
+  updateSignal(st.paused ? 0 : dt);
   updateOSD(st.paused ? 0 : dt);
 
   // animacje mapy misyjnej (woda, wirniki, żuraw, mewy) — także w menu, tylko bez postępu czasu

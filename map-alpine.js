@@ -114,9 +114,14 @@ var AlpineMap = (function () {
     root.add(terrain);
 
     /* ---------- helpery (te same konwencje co w map-port.js) ---------- */
+    const detailLoader = new THREE.TextureLoader();
+    const stoneDetail = detailLoader.load('assets/textures/weathered-concrete.jpg');
+    stoneDetail.wrapS = stoneDetail.wrapT = THREE.RepeatWrapping;
+    stoneDetail.repeat.set(2, 2); stoneDetail.anisotropy = aniso;
+    stoneDetail.encoding = THREE.sRGBEncoding;
     const M = {
-      concrete: new THREE.MeshStandardMaterial({ color: 0x9d9d98, roughness: 0.95 }),
-      concreteDark: new THREE.MeshStandardMaterial({ color: 0x6f7370, roughness: 0.95 }),
+      concrete: new THREE.MeshStandardMaterial({ map: stoneDetail, color: 0xb0b0aa, roughness: 0.95 }),
+      concreteDark: new THREE.MeshStandardMaterial({ map: stoneDetail, color: 0x767b76, roughness: 0.95 }),
       steel: new THREE.MeshStandardMaterial({ color: 0x8b9299, roughness: 0.55, metalness: 0.6 }),
       steelDark: new THREE.MeshStandardMaterial({ color: 0x474d52, roughness: 0.6, metalness: 0.5 }),
       wood: new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 0.95 }),
@@ -126,7 +131,7 @@ var AlpineMap = (function () {
       white: new THREE.MeshStandardMaterial({ color: 0xdad7ce, roughness: 0.8 }),
       yellow: new THREE.MeshStandardMaterial({ color: 0xdcae3a, roughness: 0.8 }),
       asphalt: new THREE.MeshStandardMaterial({ color: 0x3c4043, roughness: 0.98 }),
-      rock: new THREE.MeshStandardMaterial({ color: 0x6d6a64, roughness: 1 }),
+      rock: new THREE.MeshStandardMaterial({ map: stoneDetail, color: 0x77736c, roughness: 1 }),
       trunk: new THREE.MeshStandardMaterial({ color: 0x40301f, roughness: 1 }),
       pine: new THREE.MeshStandardMaterial({ color: 0x24401f, roughness: 1 }),
       glass: new THREE.MeshStandardMaterial({ color: 0x1a2830, roughness: 0.2, metalness: 0.6 }),
