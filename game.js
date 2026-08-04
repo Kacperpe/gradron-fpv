@@ -866,7 +866,7 @@ const tilt = {
   range: Number(localStorage.getItem('gradron.tiltrange')) || 28,   // stopnie do wychylenia max
   roll: 0, pitch: 0,                                               // -1..1 po kalibracji
   refRoll: null, refPitch: null, rawRoll: 0, rawPitch: 0, lastEvent: 0,
-  source: '—', lastOrient: 0,
+  source: '—', lastBy: {}, blocked: false, sensorApi: 'nie próbowano', sensor: null,
   // pola tylko do diagnostyki na żywym telefonie (menu → Diagnostyka czujnika)
   events: 0, perm: 'nie pytano', note: '', alpha: 0, beta: 0, gamma: 0, angle: 0, nulls: 0,
   motionEvents: 0, motionNulls: 0, motionPerm: 'nie pytano', acc: [0, 0, 0]
@@ -894,13 +894,16 @@ function tiltAxes(e) {
     pitch: Math.asin(clamp(-_tUp.y, -1, 1)) / DEG     // dodatnie = górna krawędź w dół
   };
 }
-/* wspólne wejście dla obu czujników: kąty już w układzie ekranu */
+/* wspólne wejście dla wszystkich czujników: kąty już w układzie ekranu.
+   Gdy kilka źródeł mówi naraz, słuchamy najgładszego, które wciąż nadaje. */
+const TILT_PRIO = { 'orientacja': 3, 'sensor API': 2, 'akcelerometr': 1 };
 function applyTilt(rollDeg, pitchDeg, source) {
   const now = performance.now();
-  // odczyt z orientacji jest gładszy, więc akcelerometr wchodzi tylko gdy tamtego brak
-  if (source === 'akcelerometr' && tilt.source === 'orientacja' && now - tilt.lastOrient < 1500) return;
+  const prio = TILT_PRIO[source] || 0;
+  for (const s in tilt.lastBy)
+    if ((TILT_PRIO[s] || 0) > prio && now - tilt.lastBy[s] < 1500) return;
+  tilt.lastBy[source] = now;
   tilt.source = source;
-  if (source === 'orientacja') tilt.lastOrient = now;
   if (!tilt.ready) { tilt.ready = true; tilt.note = ''; paintTiltBtn(); }
   tilt.lastEvent = now;
   tilt.rawRoll = rollDeg; tilt.rawPitch = pitchDeg;
@@ -957,6 +960,48 @@ function onMotionEvent(e) {
   }
   applyTilt(Math.asin(clamp(-ux, -1, 1)) / DEG, Math.asin(clamp(-uy, -1, 1)) / DEG, 'akcelerometr');
 }
+
+/* Trzecie podejście: Generic Sensor API. Odczyty w układzie ekranu dostajemy
+   od razu, więc nie trzeba obracać osi ręcznie. */
+const _sensUp = new V3(), _sensNew = new V3();
+let sensInit = false;
+function startSensorApi() {
+  if (typeof Accelerometer !== 'function') { tilt.sensorApi = 'brak API'; return; }
+  try {
+    const s = new Accelerometer({ frequency: 30, referenceFrame: 'screen' });
+    s.addEventListener('reading', () => {
+      const len = Math.hypot(s.x || 0, s.y || 0, s.z || 0);
+      if (len < 1) return;
+      _sensNew.set(s.x / len, s.y / len, s.z / len);
+      if (!sensInit) { _sensUp.copy(_sensNew); sensInit = true; }
+      else _sensUp.lerp(_sensNew, 0.16).normalize();
+      tilt.sensorApi = 'czyta';
+      applyTilt(Math.asin(clamp(-_sensUp.x, -1, 1)) / DEG,
+        Math.asin(clamp(-_sensUp.y, -1, 1)) / DEG, 'sensor API');
+    });
+    s.addEventListener('error', ev => {
+      tilt.sensorApi = 'błąd: ' + ((ev.error && ev.error.name) || '?');
+    });
+    s.start();
+    tilt.sensor = s;
+    tilt.sensorApi = 'uruchomiony';
+  } catch (e) {
+    tilt.sensorApi = 'błąd: ' + (e && e.name ? e.name : '?');
+  }
+}
+
+/* Brave (i podobne) nie blokują API, tylko podstawiają puste odczyty w ramach
+   ochrony przed odciskiem palca — trzeba to nazwać po imieniu, bo inaczej
+   wygląda jak zepsuta gra. */
+let isBrave = false;
+try {
+  if (navigator.brave && navigator.brave.isBrave) navigator.brave.isBrave().then(v => { isBrave = !!v; });
+} catch (e) { }
+function tiltHelpText() {
+  return isBrave
+    ? 'Brave blokuje czujniki ruchu tarczą (ochrona przed odciskiem palca). Dotknij lwa obok adresu i wyłącz Shields dla tej strony — albo Ustawienia → Brave Shields i prywatność → Odcisk palca → zezwól.'
+    : 'Przeglądarka blokuje czujniki ruchu. Dotknij ikony obok adresu → Uprawnienia / Ustawienia strony → Czujniki ruchu → Zezwalaj. Sprawdź też, czy strona jest na https i nie w trybie oszczędzania energii.';
+}
 function calibrateTilt(quiet) {
   tilt.refRoll = tilt.rawRoll; tilt.refPitch = tilt.rawPitch;
   tilt.roll = tilt.pitch = 0;
@@ -966,11 +1011,13 @@ function setTilt(on) {
   if (on && !tilt.on) {
     const start = () => {
       tilt.events = tilt.nulls = tilt.motionEvents = tilt.motionNulls = 0;
-      tilt.ready = false; tilt.source = '—'; tilt.lastOrient = 0; accInit = false;
+      tilt.ready = false; tilt.source = '—'; tilt.lastBy = {}; tilt.blocked = false;
+      accInit = sensInit = false;
       /* trzy źródła naraz — bierzemy to, które faktycznie coś przysyła */
       window.addEventListener('deviceorientation', onTiltEvent);
       window.addEventListener('deviceorientationabsolute', onTiltEvent);
       window.addEventListener('devicemotion', onMotionEvent);
+      startSensorApi();
       tilt.on = true; tilt.refRoll = tilt.refPitch = null;
       document.body.classList.add('gyro');
       paintTiltBtn();
@@ -980,11 +1027,13 @@ function setTilt(on) {
          pierwszym prawdziwym odczycie, więc czekanie nic nie psuje. */
       setTimeout(() => {
         if (!tilt.on || tilt.ready) return;
-        tilt.note = (tilt.events + tilt.motionEvents)
-          ? 'przychodzą puste odczyty (×' + (tilt.nulls + tilt.motionNulls) + ') — telefon nie udostępnia czujników'
+        tilt.blocked = (tilt.nulls + tilt.motionNulls) > 0;
+        tilt.note = tilt.blocked
+          ? 'puste odczyty (×' + (tilt.nulls + tilt.motionNulls) + ') — przeglądarka blokuje czujniki'
           : 'przeglądarka nie przysyła zdarzeń czujników';
         paintTiltBtn();
-        msg('CZEKAM NA CZUJNIK', 'menu → Diagnostyka czujnika przechyłu', 2.6);
+        msg(tilt.blocked ? 'CZUJNIK ZABLOKOWANY' : 'CZEKAM NA CZUJNIK',
+          'menu → Diagnostyka czujnika przechyłu', 2.8);
       }, 3000);
     };
     /* iOS 13+ wymaga zgody użytkownika, i to z gestu — stąd włączanie przyciskiem.
@@ -1870,11 +1919,15 @@ if (UI_MODES.indexOf(uiMode) < 0) uiMode = 'AUTO';
 
 function detectDevice() {
   if (UI_TO_DEVICE[uiMode]) return UI_TO_DEVICE[uiMode];
-  const short = Math.min(window.innerWidth, window.innerHeight);
-  const long = Math.max(window.innerWidth, window.innerHeight);
   if (!touch.supported) return 'desktop';
-  if (short <= 500 || long <= 820) return 'phone';       // telefony w pionie i w poziomie
-  return 'tablet';                                        // duży ekran dotykowy
+  /* Próg 600 CSS px na krótszym boku to androidowa granica "sw600dp" między
+     telefonem a tabletem. Liczymy z ekranu, nie z okna, bo powiększenie strony
+     w przeglądarce potrafi rozdmuchać innerWidth telefonu powyżej progu. */
+  const w = (screen && screen.width) || window.innerWidth;
+  const h = (screen && screen.height) || window.innerHeight;
+  const short = Math.min(w, h), long = Math.max(w, h);
+  if (short < 600 || long < 900) return 'phone';
+  return 'tablet';
 }
 let device = '';
 function applyDevice() {
@@ -1947,6 +2000,8 @@ function diagLines() {
     ['orientacja: zdarzeń / pustych', tilt.events + ' / ' + tilt.nulls, tilt.events > 0 && tilt.nulls === 0],
     ['ruch: zdarzeń / pustych', tilt.motionEvents + ' / ' + tilt.motionNulls,
       tilt.motionEvents > 0 && tilt.motionNulls === 0],
+    ['Sensor API', tilt.sensorApi, tilt.sensorApi === 'czyta'],
+    ['przeglądarka', isBrave ? 'Brave (tarcza blokuje czujniki)' : 'inna niż Brave', !isBrave],
     ['grawitacja (x/y/z)', tilt.acc.join(' / '), tilt.motionEvents > 0],
     ['ostatnie zdarzenie', since === null ? '—' : since + ' ms temu', since !== null && since < 1500],
     ['alpha / beta / gamma', num(tilt.alpha) + ' / ' + num(tilt.beta) + ' / ' + num(tilt.gamma),
@@ -1966,6 +2021,12 @@ function diagLines() {
 function paintDiag() {
   if (!diagOpen) return;
   diagRows.innerHTML = '';
+  if (tilt.blocked) {
+    const h = document.createElement('p');
+    h.className = 'diag-help';
+    h.textContent = tiltHelpText();
+    diagRows.appendChild(h);
+  }
   for (const row of diagLines()) {
     const d = document.createElement('div');
     d.className = 'd ' + (row[2] ? 'ok' : 'bad');
@@ -2232,7 +2293,7 @@ if (/[?&]auto/.test(location.search)) {
   window.__gd = {
     st, stick, gates, THREE, camera, colliders, inSolid, physics,
     renderer, scene, groundMap, concreteMap,
-    setMap, cycleMap, cycleNav, navTarget, updateSignal, touch, tilt, FOV,
+    setMap, cycleMap, cycleNav, navTarget, updateSignal, touch, tilt, FOV, setDiag, setTilt,
     get activeMap() { return activeMap; }, get device() { return device; },
     get builtMaps() { return builtMaps; }
   }; // hook do testów
